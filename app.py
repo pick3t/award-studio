@@ -34,7 +34,7 @@ DATA_DIR = Path(sys.executable).parent if getattr(sys, "frozen", False) else BAS
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
 
 from core.certificate import (  # noqa: E402
     CertificateContext,
