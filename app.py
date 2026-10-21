@@ -228,12 +228,7 @@ class AwardStudio(ctk.CTk):
             except Exception:  # noqa: BLE001
                 pass
         self.title(f"Award Studio · 比赛评分与奖状生成 v{APP_VERSION}")
-        icon = BASE_DIR / "assets" / "icon.ico"
-        if icon.exists():
-            try:
-                self.iconbitmap(str(icon))
-            except Exception:  # noqa: BLE001
-                pass
+        self._set_window_icon()
         self.configure(fg_color=BG)
 
         # 状态
@@ -334,6 +329,29 @@ class AwardStudio(ctk.CTk):
             pass
 
     # -------------------------------------------------------------- 布局
+    def _set_window_icon(self) -> None:
+        """窗口图标：先用 ico（同时关掉 CustomTkinter 自带的默认图标），再叠 PNG。
+
+        CustomTkinter 在 iconbitmap 没被调用过时会强行塞它自己的蓝色图标，
+        所以必须先调 iconbitmap 把那个开关关掉；PNG 负责高分屏下的清晰度。
+        """
+        from tkinter import PhotoImage
+
+        ico = BASE_DIR / "assets" / "icon.ico"
+        png = BASE_DIR / "assets" / "icon.png"
+
+        if ico.exists():
+            try:
+                self.iconbitmap(str(ico))
+            except Exception:  # noqa: BLE001
+                pass
+        if png.exists():
+            try:
+                self._icon_photo = PhotoImage(file=str(png))
+                self.iconphoto(True, self._icon_photo)
+            except Exception:  # noqa: BLE001
+                pass
+
     def _center(self, width: int, height: int) -> None:
         """按逻辑尺寸开窗并居中，内部换算成物理像素。"""
         self.update_idletasks()
