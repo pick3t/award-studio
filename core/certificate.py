@@ -89,9 +89,8 @@ def _replace_in_paragraph(paragraph, mapping: dict[str, str]) -> int:
         for match in PLACEHOLDER_RE.finditer(text):
             key = match.group(1) or match.group(2) or ""
             value = _lookup(mapping, key)
-            if value is None:
-                continue
-            _apply_value(runs, match.start(), match.end(), str(value))
+            # 映射里没有的占位符按空值处理，避免生成的证书里留着花括号
+            _apply_value(runs, match.start(), match.end(), "" if value is None else str(value))
             count += 1
             replaced = True
             break
