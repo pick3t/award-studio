@@ -423,16 +423,32 @@ class AwardStudio(ctk.CTk):
         self._build_left(main)
         self._build_right(main)
 
+    def _build_logo(self, parent):
+        """左上角 logo 直接用应用图标，找不到图标文件才退回字母 A。"""
+        size = 46
+        try:
+            from PIL import Image
+
+            with Image.open(BASE_DIR / "assets" / "icon.png") as raw:
+                picture = raw.copy()
+            self._logo_image = ctk.CTkImage(light_image=picture, dark_image=picture,
+                                            size=(size, size))
+            return ctk.CTkLabel(parent, text="", image=self._logo_image,
+                                width=size, height=size)
+        except Exception:  # noqa: BLE001
+            badge = ctk.CTkFrame(parent, width=44, height=44, corner_radius=13, fg_color=PRIMARY)
+            badge.grid_propagate(False)
+            ctk.CTkLabel(badge, text="A", font=self._mkfont("badge", 22, "bold", NUM_FONT),
+                         text_color="#FFFFFF").place(relx=0.5, rely=0.5, anchor="center")
+            return badge
+
     def _build_header(self) -> None:
         self.header_frame = header = ctk.CTkFrame(self, fg_color="transparent", height=72)
         header.grid(row=0, column=0, sticky="ew", padx=22, pady=(12, 8))
         header.grid_columnconfigure(1, weight=1)
 
-        self.badge = badge = ctk.CTkFrame(header, width=44, height=44, corner_radius=13, fg_color=PRIMARY)
+        self.badge = badge = self._build_logo(header)
         badge.grid(row=0, column=0, rowspan=2, sticky="w")
-        badge.grid_propagate(False)
-        ctk.CTkLabel(badge, text="A", font=self._mkfont("badge", 22, "bold", NUM_FONT),
-                     text_color="#FFFFFF").place(relx=0.5, rely=0.5, anchor="center")
 
         ctk.CTkLabel(header, text="Award Studio", font=self.font_h1, text_color=INK,
                      anchor="w").grid(row=0, column=1, sticky="w", padx=(14, 0))
