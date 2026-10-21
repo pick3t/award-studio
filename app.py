@@ -286,6 +286,7 @@ class AwardStudio(ctk.CTk):
 
         self._setup_style()
         self._build()
+        self._refresh_table()
         if self.text_scale != 1.0:
             self._apply_text_scale()
         self._log("就绪 · 选择成绩表后会自动按分数排名", "muted")
@@ -927,11 +928,25 @@ class AwardStudio(ctk.CTk):
                              stretch=key in ("project", "class"))
         self.tree.grid(row=0, column=0, sticky="nsew")
 
-        scrollbar = ctk.CTkScrollbar(holder, command=self.tree.yview,
-                                     fg_color="transparent", button_color="#D4D9E4",
-                                     button_hover_color="#B9C0D0", width=10)
+        self.table_scrollbar = scrollbar = ctk.CTkScrollbar(
+            holder, command=self.tree.yview, fg_color="transparent",
+            button_color="#D4D9E4", button_hover_color="#B9C0D0", width=10)
         scrollbar.grid(row=0, column=1, sticky="ns", padx=(2, 4))
         self.tree.configure(yscrollcommand=scrollbar.set)
+
+        # 没有数据时显示占位提示，而不是一张空表格
+        self.empty_panel = ctk.CTkFrame(holder, fg_color="transparent")
+        self.empty_panel.grid(row=0, column=0, columnspan=2, sticky="nsew")
+        empty_inner = ctk.CTkFrame(self.empty_panel, fg_color="transparent")
+        empty_inner.place(relx=0.5, rely=0.45, anchor="center")
+        ctk.CTkLabel(empty_inner, text="▤", font=self._mkfont("empty_icon", 30),
+                     text_color="#CBD2E0").pack()
+        ctk.CTkLabel(empty_inner, text="还没有成绩数据",
+                     font=self._mkfont("empty_title", 13), text_color="#8A93A6").pack(pady=(4, 2))
+        self.empty_hint = ctk.CTkLabel(
+            empty_inner, text="选择左侧的 Excel 成绩表，或直接把文件拖进窗口",
+            font=self.font_small, text_color="#A7AFC0", justify="center")
+        self.empty_hint.pack()
 
         self.tree.tag_configure("first", background="#FFF8E6", foreground="#8A5A00")
         self.tree.tag_configure("second", background="#F4F7FB", foreground="#3A4A5F")
@@ -1549,7 +1564,25 @@ class AwardStudio(ctk.CTk):
             if top:
                 self._log(f"最高分 {top.player.score:g} · {top.player.name}", "info")
 
+    def _show_empty_state(self, empty: bool) -> None:
+        """没有数据时用占位提示替代空表格，避免看起来像残留。"""
+        try:
+            if empty:
+                self.tree.grid_remove()
+                self.table_scrollbar.grid_remove()
+                self.empty_panel.grid()
+            else:
+                self.empty_panel.grid_remove()
+                self.tree.grid()
+                self.table_scrollbar.grid()
+        except Exception:  # noqa: BLE001
+            pass
+
     def _refresh_table(self) -> None:
+        if not self.entries:
+            self._show_empty_state(True)
+            return
+        self._show_empty_state(False)
         self.tree.delete(*self.tree.get_children())
         for index, entry in enumerate(self.entries):
             extras = entry.player.extras
