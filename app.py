@@ -748,10 +748,9 @@ class AwardStudio(ctk.CTk):
         self.template_hint.pack(fill="x")
 
         # ③ 字段映射
-        self._step_title(wrap, "③", "字段映射", "指定占位符取什么值")
+        self.mapping_anchor = self._step_title(wrap, "③", "字段映射", "指定占位符取什么值")
         # 固定容器：内部控件按需显示，容器本身始终占位以保持顺序（内容为空时不占高度）
         self.mapping_section = ctk.CTkFrame(wrap, fg_color="transparent")
-        self.mapping_section.pack(fill="x")
         self.mapping_box = ctk.CTkFrame(self.mapping_section, fg_color="transparent")
         self.mapping_hint = ctk.CTkLabel(
             self.mapping_section, text="选择奖状模板后，这里会列出模板里的占位符",
@@ -858,6 +857,7 @@ class AwardStudio(ctk.CTk):
                                      text_color=MUTED, height=self._px(16), anchor="w")
             sub_label.pack(fill="x")
         self._step_labels.append((title_label, 19, sub_label, 16))
+        return row
 
     def _build_right(self, parent) -> None:
         right = ctk.CTkFrame(parent, fg_color="transparent")
@@ -1163,13 +1163,16 @@ class AwardStudio(ctk.CTk):
         self._sync_mapping_visibility()
 
     def _sync_mapping_visibility(self) -> None:
-        """没有模板或没有占位符时整块隐藏，避免留白。"""
+        """没有模板或没有占位符时整块移除，避免 CTkFrame 空置时留下 200px 空白。"""
         has_fields = bool(self.field_rules) and bool(self.template_keys)
         if not has_fields:
             self.mapping_box.pack_forget()
             self.mapping_hint.pack_forget()
             self.mapping_toggle.pack_forget()
+            self.mapping_section.pack_forget()
             return
+        if not self.mapping_section.winfo_ismapped():
+            self.mapping_section.pack(fill="x", after=self.mapping_anchor)
         self.mapping_hint.pack_forget()
         # 先按钮后列表，保证容器内顺序稳定
         if not self.mapping_toggle.winfo_ismapped():
