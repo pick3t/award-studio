@@ -1541,19 +1541,24 @@ class AwardStudio(ctk.CTk):
         if bool(self.award_switch.get()):
             tiers = [(item["name"].strip() or "奖项", max(0, int(item["count"])))
                      for item in self.awards]
-        quota = sum(count for _name, count in tiers) if tiers else self.winners
-        self.quota = quota
-        self.entries = rank_players(
-            self.players,
-            winners=quota,
-            use_tiers=bool(tiers),
-            award_tiers=tiers,
-        )
+        if not self.score_columns:
+            # 没选评判列就不排序，按表格原始行顺序展示
+            self.quota = 0
+            self.entries = rank_players(self.players, ranked=False)
+        else:
+            quota = sum(count for _name, count in tiers) if tiers else self.winners
+            self.quota = quota
+            self.entries = rank_players(
+                self.players,
+                winners=quota,
+                use_tiers=bool(tiers),
+                award_tiers=tiers,
+            )
         self._refresh_table()
         self._refresh_stats()
         self._update_table_note()
         self._update_award_warning()
-        if not keep_log:
+        if not keep_log and self.score_columns:
             top = self.entries[0] if self.entries else None
             if top:
                 self._log(f"最高分 {top.player.score:g} · {top.player.name}", "info")
@@ -1632,6 +1637,7 @@ class AwardStudio(ctk.CTk):
         self._apply_score_columns()
         self._build_table()
         self._recalculate(keep_log=True)
+        self._sync_buttons()
 
     def _heading_label(self, key: str, text: str) -> str:
         """参与排名的列在标题前加 ✓，其余保持原样（表头空间紧张，标记尽量短）。"""
@@ -1749,7 +1755,7 @@ class AwardStudio(ctk.CTk):
         for index, entry in enumerate(self.entries):
             fields = entry.player.fields
             award_text = (entry.award or "—") if entry.is_winner else "—"
-            values = [entry.rank]
+            values = [entry.rank if entry.rank else "—"]
             for key, _text, _width, _anchor in self._table_columns[1:-1]:
                 if key == "分数":
                     values.append(f"{entry.player.score:g}")
@@ -1779,7 +1785,7 @@ class AwardStudio(ctk.CTk):
         if not self.players:
             note.configure(text="同分并列名次 · 前三名高亮")
         elif not self.score_columns:
-            note.configure(text="未选评判列，暂按原综合分排 · 点表头勾选")
+            note.configure(text="未选评判列：按表格原始顺序显示 · 点表头数字列勾选后才排名")
         else:
             names = "、".join(self.score_columns)
             note.configure(text=f"排名依据：{names}")
@@ -1789,7 +1795,7 @@ class AwardStudio(ctk.CTk):
         warn = getattr(self, "award_warn", None)
         if warn is None:
             return
-        if not self.award_switch.get() or not self.entries:
+        if not self.award_switch.get() or not self.entries or not self.score_columns:
             warn.pack_forget()
             warn.configure(text="")
             self._last_conflict = ""
@@ -1827,8 +1833,13 @@ class AwardStudio(ctk.CTk):
         scores = [p.score for p in self.players]
         winners = winners_of(self.entries)
         self.stat_values["total"].configure(text=str(len(self.players)))
-        self.stat_values["max"].configure(text=f"{max(scores):g}")
-        self.stat_values["avg"].configure(text=f"{sum(scores) / len(scores):.1f}")
+        if not self.score_columns:
+            # 没有选择评判列就不做分数统计，避免暗示已经排过序
+            self.stat_values["max"].configure(text="—")
+            self.stat_values["avg"].configure(text="—")
+        else:
+            self.stat_values["max"].configure(text=f"{max(scores):g}")
+            self.stat_values["avg"].configure(text=f"{sum(scores) / len(scores):.1f}")
         self.stat_values["awards"].configure(text=str(len(winners)))
         if bool(self.award_switch.get()):
             tiers: dict[str, int] = {}
@@ -1841,7 +1852,8 @@ class AwardStudio(ctk.CTk):
             self.merge_hint.configure(text=f"仅排名次 · 前 {len(winners)} 名")
 
     def _sync_buttons(self) -> None:
-        ready = bool(self.excel_path and self.template_path and not self.busy)
+        ready = bool(self.excel_path and self.template_path and not self.busy
+                     and self.score_columns)
         self.generate_btn.configure(state="normal" if ready else "disabled",
                                     fg_color=PRIMARY if ready else "#C7CBDA")
 
