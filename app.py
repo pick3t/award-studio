@@ -34,6 +34,8 @@ DATA_DIR = Path(sys.executable).parent if getattr(sys, "frozen", False) else BAS
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
+APP_VERSION = "1.1.0"
+
 from core.certificate import (  # noqa: E402
     CertificateContext,
     CertificateError,
@@ -225,7 +227,7 @@ class AwardStudio(ctk.CTk):
                 self.tk.call("tk", "scaling", 1.33)
             except Exception:  # noqa: BLE001
                 pass
-        self.title("Award Studio · 比赛评分与奖状生成")
+        self.title(f"Award Studio · 比赛评分与奖状生成 v{APP_VERSION}")
         icon = BASE_DIR / "assets" / "icon.ico"
         if icon.exists():
             try:
