@@ -24,10 +24,13 @@
 
 | 平台 | 文件 | 打开方式 |
 |---|---|---|
-| Windows 10 / 11（64 位） | `AwardStudio.exe` | 双击运行 |
+| Windows 10 / 11（64 位） | `AwardStudio.exe` | 双击运行，绝大多数电脑用这个 |
+| Windows 10（32 位） | `AwardStudio-x86.exe` | 老的 32 位系统用这个，功能完全一样 |
 | macOS（Apple Silicon） | `AwardStudio-macOS.zip` | 解压后把 `AwardStudio.app` 拖进「应用程序」 |
 
-两个包都没做代码签名，所以：
+不确定自己用的是哪种 Windows？「设置 → 系统 → 关于 → 系统类型」，显示「64 位操作系统」就用第一个。Windows 11 只有 64 位，不存在 32 位版本。
+
+这些包都没做代码签名，所以：
 
 - **Windows** 首次运行会提示「已保护你的电脑」，点「更多信息 → 仍要运行」即可
 - **macOS** 首次会被 Gatekeeper 拦住，在 Finder 里**右键**点 App → 打开 → 再点「打开」，或执行一次 `xattr -dr com.apple.quarantine /Applications/AwardStudio.app`
