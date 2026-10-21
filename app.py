@@ -165,6 +165,8 @@ class AwardStudio(ctk.CTk):
         self._log("就绪 · 选择成绩表后会自动按分数排名", "muted")
         self._sync_buttons()
 
+        self._enable_file_drop()
+
         if demo:
             self.after(300, self._load_demo)
         if "--diag" in sys.argv:
@@ -431,7 +433,7 @@ class AwardStudio(ctk.CTk):
             command=self._choose_excel,
         )
         self.excel_btn.pack(fill="x", pady=(8, 3))
-        self.excel_hint = ctk.CTkLabel(wrap, text="支持 .xlsx / .xlsm", font=self.font_small,
+        self.excel_hint = ctk.CTkLabel(wrap, text="支持 .xlsx / .xlsm，也可直接把文件拖进窗口", font=self.font_small,
                                        text_color=MUTED, anchor="w", justify="left")
         self.excel_hint.pack(fill="x")
 
@@ -444,7 +446,7 @@ class AwardStudio(ctk.CTk):
             command=self._choose_template,
         )
         self.template_btn.pack(fill="x", pady=(8, 3))
-        self.template_hint = ctk.CTkLabel(wrap, text="尚未选择模板", font=self.font_small,
+        self.template_hint = ctk.CTkLabel(wrap, text="支持 .docx，也可直接把文件拖进窗口", font=self.font_small,
                                           text_color=MUTED, anchor="w", justify="left",
                                           wraplength=286)
         self.template_hint.pack(fill="x")
@@ -689,9 +691,10 @@ class AwardStudio(ctk.CTk):
             filetypes=[("Word 文档", "*.docx"), ("所有文件", "*.*")],
             initialdir=str(self.template_path.parent) if self.template_path else str(BASE_DIR),
         )
-        if not path:
-            return
-        template = Path(path)
+        if path:
+            self._load_template(Path(path))
+
+    def _load_template(self, template: Path) -> None:
         try:
             keys = inspect_template(template)
         except Exception as exc:  # noqa: BLE001
@@ -710,6 +713,100 @@ class AwardStudio(ctk.CTk):
             )
             self._log("模板里没有找到 {{ }} 占位符，生成时会失败", "warn")
         self._sync_buttons()
+
+    # -------------------------------------------------------------- 文件拖放
+    def _enable_file_drop(self) -> None:
+        """接收从资源管理器拖进窗口的文件。
+
+        tkinter 自身不支持文件拖放，这里用 Windows 原生的 DragAcceptFiles + 窗口过程
+        替换来处理 WM_DROPFILES。任何一步失败都静默降级，用户仍可点按钮选文件。
+        """
+        if sys.platform != "win32":
+            return
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            user32 = ctypes.windll.user32
+            shell32 = ctypes.windll.shell32
+            hwnd = int(self.frame(), 16)
+
+            WM_DROPFILES = 0x0233
+            GWL_WNDPROC = -4
+
+            user32.GetWindowLongPtrW.restype = ctypes.c_void_p
+            user32.GetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int]
+            user32.SetWindowLongPtrW.restype = ctypes.c_void_p
+            user32.SetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_void_p]
+            user32.CallWindowProcW.restype = ctypes.c_ssize_t
+            user32.CallWindowProcW.argtypes = [ctypes.c_void_p, wintypes.HWND, wintypes.UINT,
+                                               wintypes.WPARAM, wintypes.LPARAM]
+            shell32.DragAcceptFiles.argtypes = [wintypes.HWND, wintypes.BOOL]
+            shell32.DragQueryFileW.restype = wintypes.UINT
+            shell32.DragQueryFileW.argtypes = [wintypes.HANDLE, wintypes.UINT,
+                                               wintypes.LPWSTR, wintypes.UINT]
+            shell32.DragFinish.argtypes = [wintypes.HANDLE]
+
+            self._drop_hwnd = hwnd
+            self._user32 = user32
+            self._old_wndproc = user32.GetWindowLongPtrW(hwnd, GWL_WNDPROC)
+            shell32.DragAcceptFiles(hwnd, True)
+
+            callback_type = ctypes.WINFUNCTYPE(
+                ctypes.c_ssize_t, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM
+            )
+
+            def wndproc(h, msg, wparam, lparam):
+                if msg == WM_DROPFILES:
+                    try:
+                        files = self._read_dropped_files(wparam)
+                    finally:
+                        shell32.DragFinish(wparam)
+                    if files:
+                        self.after(10, lambda: self._handle_dropped_files(files))
+                    return 0
+                return user32.CallWindowProcW(self._old_wndproc, h, msg, wparam, lparam)
+
+            self._wndproc = callback_type(wndproc)
+            user32.SetWindowLongPtrW(hwnd, GWL_WNDPROC, self._wndproc)
+        except Exception:  # noqa: BLE001
+            self._old_wndproc = None
+
+    @staticmethod
+    def _read_dropped_files(hdrop) -> list[str]:
+        import ctypes
+
+        shell32 = ctypes.windll.shell32
+        total = shell32.DragQueryFileW(hdrop, 0xFFFFFFFF, None, 0)
+        files: list[str] = []
+        for index in range(total):
+            length = shell32.DragQueryFileW(hdrop, index, None, 0)
+            buffer = ctypes.create_unicode_buffer(length + 1)
+            shell32.DragQueryFileW(hdrop, index, buffer, length + 1)
+            if buffer.value:
+                files.append(buffer.value)
+        return files
+
+    def _handle_dropped_files(self, files: list[str]) -> None:
+        for raw in files:
+            path = Path(raw)
+            suffix = path.suffix.lower()
+            if suffix in {".xlsx", ".xlsm"}:
+                self._load_excel(path)
+            elif suffix == ".docx":
+                self._load_template(path)
+            else:
+                self._log(f"忽略不支持的文件：{path.name}（需要 .xlsx 或 .docx）", "warn")
+
+    def destroy(self) -> None:
+        # 还原窗口过程，避免退出时回调已销毁的 Tk 对象
+        try:
+            if getattr(self, "_old_wndproc", None):
+                self._user32.SetWindowLongPtrW(self._drop_hwnd, -4, self._old_wndproc)
+                self._old_wndproc = None
+        except Exception:  # noqa: BLE001
+            pass
+        super().destroy()
 
     def _choose_output(self) -> None:
         initial = str(self.output_dir) if self.output_dir else str(BASE_DIR)
@@ -1180,6 +1277,7 @@ class AwardStudio(ctk.CTk):
             "窗口和控件会跟着一起放大，超出屏幕时自动贴合屏幕，左侧设置区可上下滚动。"
             "选择会自动记住，下次打开保持这个字号。\n\n"
             "小技巧\n"
+            "· 成绩表和奖状模板都可以直接从资源管理器拖进窗口，不必点按钮选路径。\n"
             "· 表格前几行有标题、说明没关系，表头会在前 20 行内自动定位。\n"
             "· 没有「总分」列但有多位评委列时，分数自动相加。\n"
             "· 双击排名表里的某一行，可以直接打开已生成的那份奖状。\n"
