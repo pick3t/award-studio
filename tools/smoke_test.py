@@ -81,7 +81,7 @@ def main() -> int:
 
     print("3) 奖状模板")
     keys = inspect_template(template)
-    check({"姓名", "奖项"} <= keys, f"模板包含 姓名/奖项 占位符：{sorted(keys)}")
+    check({"姓名", "奖项"} <= set(keys), f"模板包含 姓名/奖项 占位符：{sorted(keys)}")
 
     print("4) 生成奖状")
     if OUTPUT.exists():

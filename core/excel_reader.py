@@ -60,6 +60,13 @@ class Player:
     extras: dict[str, str] = field(default_factory=dict)
     row: int = 0
 
+    @property
+    def fields(self) -> dict[str, str]:
+        """姓名/编号/分数 + 表格里的其他列，供字段映射按列名取值。"""
+        data = {"姓名": self.name, "编号": self.no, "分数": f"{self.score:g}"}
+        data.update(self.extras)
+        return data
+
 
 @dataclass
 class ParseReport:

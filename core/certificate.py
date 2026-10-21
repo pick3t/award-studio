@@ -19,6 +19,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.opc.constants import RELATIONSHIP_TYPE as RT
 
+from . import fields as field_rules
 from .ranking import RankedEntry, safe_filename
 
 PLACEHOLDER_RE = re.compile(r"\{\{\s*([^{}]{1,40}?)\s*\}\}|【\s*([^【】]{1,20}?)\s*】")
@@ -124,16 +125,16 @@ def _iter_paragraphs(document):
                 continue
 
 
-def inspect_template(path: str | Path) -> set[str]:
-    """读出模板里用到的占位符字段名，供界面提示。"""
+def inspect_template(path: str | Path) -> list[str]:
+    """读出模板里用到的占位符，按在文档中出现的先后顺序返回。"""
     document = Document(str(path))
-    keys: set[str] = set()
+    keys: list[str] = []
     for paragraph in _iter_paragraphs(document):
         text = "".join(run.text for run in paragraph.runs)
         for match in PLACEHOLDER_RE.finditer(text):
             key = (match.group(1) or match.group(2) or "").strip()
-            if key:
-                keys.add(key)
+            if key and key not in keys:
+                keys.append(key)
     return keys
 
 
@@ -171,6 +172,7 @@ def generate_certificate(
     output: str | Path,
     entry: RankedEntry,
     context: CertificateContext,
+    rules: list | None = None,
 ) -> int:
     """用模板生成一份奖状，返回替换的占位符数量。"""
     template_path = Path(template)
@@ -184,6 +186,9 @@ def generate_certificate(
         raise CertificateError(f"无法打开奖状模板：{exc}") from exc
 
     mapping = build_mapping(entry, context)
+    if rules:
+        # 用户配置的字段映射优先于内置规则
+        mapping.update(field_rules.resolve_all(rules, entry, context))
     replaced = 0
     for paragraph in _iter_paragraphs(document):
         replaced += _replace_in_paragraph(paragraph, mapping)
@@ -257,6 +262,7 @@ def generate_all(
     context: CertificateContext,
     merge: bool = False,
     merged_name: str = "全部奖状_合并版.docx",
+    rules: list | None = None,
 ) -> list[Path]:
     """批量生成奖状，返回生成的文件列表。"""
     out_dir = Path(output_dir)
@@ -264,7 +270,7 @@ def generate_all(
     created: list[Path] = []
     for entry in winners:
         path = out_dir / certificate_filename(entry)
-        generate_certificate(template, path, entry, context)
+        generate_certificate(template, path, entry, context, rules=rules)
         created.append(path)
 
     if merge and created:

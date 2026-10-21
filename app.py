@@ -7,12 +7,13 @@
 
 from __future__ import annotations
 
+import calendar
 import os
 import queue
 import re
 import sys
 import threading
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
@@ -41,6 +42,7 @@ from core.certificate import (  # noqa: E402
     inspect_template,
     merge_documents,
 )
+from core import fields as field_rules  # noqa: E402
 from core import settings as prefs  # noqa: E402
 from core.excel_reader import ExcelParseError, load_players  # noqa: E402
 from core.ranking import rank_players, winners_of  # noqa: E402
@@ -78,6 +80,118 @@ DEFAULT_AWARDS = [
 
 def short(text: str, limit: int = 20) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+class DatePicker(ctk.CTkToplevel):
+    """一个轻量的日期选择弹窗（周一开始）。"""
+
+    def __init__(self, master, initial=None, on_pick=None, font=None):
+        super().__init__(master)
+        self.on_pick = on_pick
+        today = date.today()
+        self.current = initial or today
+        self.selected = initial
+        self.today = today
+
+        self.title("选择日期")
+        self.resizable(False, False)
+        self.transient(master)
+        self.configure(fg_color=CARD)
+        self._font = font or ctk.CTkFont(FONT, 12)
+
+        self._build()
+        self._render()
+        self.geometry("300x360")
+        self.after(60, self._center_on)
+        self.after(120, self._grab)
+
+    def _grab(self) -> None:
+        try:
+            self.grab_set()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _center_on(self) -> None:
+        try:
+            master = self.master
+            x = master.winfo_rootx() + (master.winfo_width() - self.winfo_width()) // 2
+            y = master.winfo_rooty() + (master.winfo_height() - self.winfo_height()) // 3
+            self.geometry(f"+{max(0, x)}+{max(0, y)}")
+            self.focus_force()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _build(self) -> None:
+        head = ctk.CTkFrame(self, fg_color="transparent")
+        head.pack(fill="x", padx=12, pady=(12, 6))
+        ctk.CTkButton(head, text="‹", width=30, height=28, corner_radius=6,
+                      fg_color="#F3F5FA", hover_color="#E6EAF3", text_color=INK,
+                      font=self._font, command=lambda: self._shift_month(-1)).pack(side="left")
+        self.month_label = ctk.CTkLabel(head, text="", font=self._font, text_color=INK)
+        self.month_label.pack(side="left", expand=True)
+        ctk.CTkButton(head, text="›", width=30, height=28, corner_radius=6,
+                      fg_color="#F3F5FA", hover_color="#E6EAF3", text_color=INK,
+                      font=self._font, command=lambda: self._shift_month(1)).pack(side="right")
+
+        weekdays = ctk.CTkFrame(self, fg_color="transparent")
+        weekdays.pack(fill="x", padx=12)
+        for index, name in enumerate(("一", "二", "三", "四", "五", "六", "日")):
+            weekdays.grid_columnconfigure(index, weight=1)
+            ctk.CTkLabel(weekdays, text=name, font=self._font, text_color=MUTED,
+                         width=36).grid(row=0, column=index)
+
+        self.grid_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self.grid_frame.pack(fill="both", expand=True, padx=12, pady=(2, 6))
+        for index in range(7):
+            self.grid_frame.grid_columnconfigure(index, weight=1)
+
+        foot = ctk.CTkFrame(self, fg_color="transparent")
+        foot.pack(fill="x", padx=12, pady=(0, 12))
+        ctk.CTkButton(foot, text="今天", height=28, corner_radius=7, fg_color="#F3F5FA",
+                      hover_color="#E6EAF3", text_color=INK, font=self._font,
+                      command=self._pick_today).pack(side="left")
+        ctk.CTkButton(foot, text="取消", height=28, corner_radius=7, fg_color="#F3F5FA",
+                      hover_color="#E6EAF3", text_color=MUTED, font=self._font,
+                      command=self.destroy).pack(side="right")
+
+    def _shift_month(self, delta: int) -> None:
+        month = self.current.month - 1 + delta
+        year = self.current.year + month // 12
+        month = month % 12 + 1
+        self.current = date(year, month, 1)
+        self._render()
+
+    def _render(self) -> None:
+        for child in self.grid_frame.winfo_children():
+            child.destroy()
+        self.month_label.configure(text=f"{self.current.year} 年 {self.current.month} 月")
+
+        weeks = calendar.Calendar(firstweekday=0).monthdayscalendar(
+            self.current.year, self.current.month)
+        for row, week in enumerate(weeks):
+            for col, day in enumerate(week):
+                if day == 0:
+                    ctk.CTkLabel(self.grid_frame, text="", width=36, height=30).grid(
+                        row=row, column=col, padx=1, pady=1)
+                    continue
+                value = date(self.current.year, self.current.month, day)
+                is_today = value == self.today
+                is_selected = value == self.selected
+                fg = PRIMARY if is_selected else ("#EEF0FF" if is_today else "transparent")
+                color = "#FFFFFF" if is_selected else (PRIMARY if is_today else INK)
+                ctk.CTkButton(
+                    self.grid_frame, text=str(day), width=36, height=30, corner_radius=7,
+                    fg_color=fg, hover_color="#E6EAF3", text_color=color, font=self._font,
+                    command=lambda v=value: self._pick(v),
+                ).grid(row=row, column=col, padx=1, pady=1)
+
+    def _pick(self, value: date) -> None:
+        if self.on_pick:
+            self.on_pick(value)
+        self.destroy()
+
+    def _pick_today(self) -> None:
+        self._pick(self.today)
 
 
 class AwardStudio(ctk.CTk):
@@ -146,6 +260,14 @@ class AwardStudio(ctk.CTk):
         self._drag_item = None
         self._drag_y = 0
         self._drag_moved = False
+        self.field_rules: list[field_rules.FieldRule] = [
+            field_rules.FieldRule.from_dict(item)
+            for item in saved.get("field_rules", [])
+            if isinstance(item, dict) and item.get("key")
+        ]
+        self.template_keys: list[str] = []
+        self.column_names: list[str] = []
+
         self.awards = self._parse_awards(saved.get("awards"))
         self.award_mode = bool(saved.get("award_mode", True))
 
@@ -408,7 +530,7 @@ class AwardStudio(ctk.CTk):
             self.header_frame.configure(height=px(72))
             self.badge.configure(width=px(44), height=px(44))
             for button, height in (
-                (self.excel_btn, 40), (self.template_btn, 40), (self.output_btn, 38),
+                (self.excel_btn, 40), (self.template_btn, 40), (self.output_btn, 32),
                 (self.add_award_btn, 28), (self.generate_btn, 46),
             ):
                 button.configure(height=px(height))
@@ -416,12 +538,15 @@ class AwardStudio(ctk.CTk):
             self.log_box.configure(height=px(100))
             for title_label, title_h, sub_label, sub_h in self._step_labels:
                 title_label.configure(height=px(title_h))
-                sub_label.configure(height=px(sub_h))
+                if sub_label is not None:
+                    sub_label.configure(height=px(sub_h))
             self._fit_columns()
             wrap = max(160, panel_w - 60)
             self.excel_hint.configure(wraplength=wrap)
             self.template_hint.configure(wraplength=wrap)
             self._fit_award_rows()
+            if self.field_rules:
+                self._render_mappings()
         except Exception:  # noqa: BLE001 - 控件还没建好时跳过
             return
 
@@ -558,6 +683,7 @@ class AwardStudio(ctk.CTk):
         data = prefs.load()
         data["font_size"] = self.font_size
         data["award_mode"] = bool(self.award_switch.get())
+        data["field_rules"] = [rule.to_dict() for rule in self.field_rules]
         data["awards"] = [{"name": item["name"], "count": item["count"]} for item in self.awards]
         prefs.save(data)
 
@@ -621,8 +747,26 @@ class AwardStudio(ctk.CTk):
                                           wraplength=286)
         self.template_hint.pack(fill="x")
 
-        # ③ 奖项
-        self._step_title(wrap, "③", "奖项设置", "自定义名称与人数，按住 ≡ 可拖动排序")
+        # ③ 字段映射
+        self._step_title(wrap, "③", "字段映射", "指定占位符取什么值")
+        self.mapping_box = ctk.CTkFrame(wrap, fg_color="transparent")
+        self.mapping_box.pack(fill="x")
+        self.mapping_hint = ctk.CTkLabel(
+            wrap, text="选择奖状模板后，这里会列出模板里的占位符",
+            font=self.font_small, text_color=MUTED, anchor="w",
+            justify="left", wraplength=286,
+        )
+        self.mapping_hint.pack(fill="x", pady=(4, 0))
+        self.mapping_toggle = ctk.CTkButton(
+            wrap, text="收起映射", height=22, fg_color="transparent",
+            hover_color="#F1F4FA", text_color=MUTED, font=self.font_small,
+            anchor="w", command=self._toggle_mappings,
+        )
+        self.mapping_toggle.pack(fill="x", pady=(2, 0))
+        self.mapping_open = True
+
+        # ④ 奖项
+        self._step_title(wrap, "④", "奖项设置", "自定义名称与人数，按住 ≡ 可拖动排序")
 
         self.award_switch = ctk.CTkSwitch(
             wrap, text="设置奖项等级", font=self.font_small,
@@ -679,21 +823,23 @@ class AwardStudio(ctk.CTk):
 
         self._sync_award_ui()
 
-        # ④ 输出
-        self._step_title(wrap, "④", "输出位置", "每人生成一份，可选合并版")
+        # ⑤ 输出
+        self._step_title(wrap, "⑤", "输出位置", "")
+        output_row = ctk.CTkFrame(wrap, fg_color="transparent")
+        output_row.pack(fill="x", pady=(6, 0))
         self.output_btn = ctk.CTkButton(
-            wrap, text="选择输出文件夹", height=38, corner_radius=10,
+            output_row, text="选择输出文件夹", height=32, corner_radius=9,
             fg_color="#F8FAFD", hover_color="#EFF3FA", text_color=INK,
             border_width=1, border_color=LINE, font=self.font_small,
             command=self._choose_output,
         )
-        self.output_btn.pack(fill="x", pady=(8, 4))
+        self.output_btn.pack(side="left", fill="x", expand=True)
         self.merge_check = ctk.CTkCheckBox(
-            wrap, text="同时生成合并版（一份文件多页）", font=self.font_small,
-            text_color=MUTED, checkbox_width=18, checkbox_height=18, corner_radius=5,
+            output_row, text="合并版", font=self.font_small,
+            text_color=MUTED, checkbox_width=17, checkbox_height=17, corner_radius=5,
             fg_color=PRIMARY, hover_color=PRIMARY_HOVER, border_color="#C7CCDA",
         )
-        self.merge_check.pack(anchor="w")
+        self.merge_check.pack(side="left", padx=(6, 0))
         ctk.CTkFrame(wrap, fg_color="transparent", height=6).pack(fill="x")
 
     def _step_title(self, parent, badge: str, title: str, subtitle: str) -> None:
@@ -706,9 +852,11 @@ class AwardStudio(ctk.CTk):
         title_label = ctk.CTkLabel(text, text=title, font=self._mkfont("step_title", 12, "bold"),
                                    text_color=INK, height=self._px(19), anchor="w")
         title_label.pack(fill="x")
-        sub_label = ctk.CTkLabel(text, text=subtitle, font=self._mkfont("step_sub", 10),
-                                 text_color=MUTED, height=self._px(16), anchor="w")
-        sub_label.pack(fill="x")
+        sub_label = None
+        if subtitle:
+            sub_label = ctk.CTkLabel(text, text=subtitle, font=self._mkfont("step_sub", 10),
+                                     text_color=MUTED, height=self._px(16), anchor="w")
+            sub_label.pack(fill="x")
         self._step_labels.append((title_label, 19, sub_label, 16))
 
     def _build_right(self, parent) -> None:
@@ -836,6 +984,7 @@ class AwardStudio(ctk.CTk):
         self.excel_path = path
         self.players = players
         self.excel_title = report.title
+        self.column_names = list(players[0].fields.keys()) if players else []
         self.excel_btn.configure(text=short(path.name, 24), text_color=INK)
         self.excel_hint.configure(
             text=f"{report.sheet} · 表头第 {report.header_row} 行 · {report.describe()}",
@@ -855,6 +1004,7 @@ class AwardStudio(ctk.CTk):
         self.winners = min(self.winners, self.max_winners)
         self.slider.set(self.winners)
         self.qty_label.configure(text=str(self.winners))
+        self._refresh_field_rules()
         self._recalculate()
 
     def _choose_template(self) -> None:
@@ -873,6 +1023,7 @@ class AwardStudio(ctk.CTk):
             messagebox.showerror("模板无法读取", f"{exc}\n\n请确认是 .docx 文件且没有加密。")
             return
         self.template_path = template
+        self.template_keys = list(keys)
         self.template_btn.configure(text=short(template.name, 24), text_color=INK)
         if keys:
             shown = "、".join(sorted(keys))
@@ -884,6 +1035,7 @@ class AwardStudio(ctk.CTk):
                 text_color=WARNING,
             )
             self._log("模板里没有找到 {{ }} 占位符，生成时会失败", "warn")
+        self._refresh_field_rules()
         self._sync_buttons()
 
     # -------------------------------------------------------------- 文件拖放
@@ -1002,6 +1154,149 @@ class AwardStudio(ctk.CTk):
         self.qty_label.configure(text=str(self.winners))
         if self.players:
             self._recalculate(keep_log=True)
+
+    # -------------------------------------------------------------- 字段映射
+    def _toggle_mappings(self) -> None:
+        self.mapping_open = not getattr(self, "mapping_open", True)
+        if self.mapping_open:
+            self.mapping_box.pack(fill="x", before=self.mapping_toggle)
+            self.mapping_toggle.configure(text="收起映射")
+        else:
+            self.mapping_box.pack_forget()
+            count = len(self.field_rules)
+            self.mapping_toggle.configure(
+                text=f"展开映射（{count} 个字段）" if count else "展开映射")
+
+    def _column_names(self) -> list[str]:
+        if self.players:
+            return list(self.players[0].fields.keys())
+        return list(self.column_names)
+
+    def _refresh_field_rules(self) -> None:
+        """按模板占位符重建映射列表，保留用户已配置过的项。"""
+        keys = list(self.template_keys)
+        if not keys:
+            self.field_rules = []
+            self._render_mappings()
+            return
+        existing = {rule.key: rule for rule in self.field_rules}
+        context = CertificateContext(contest=self._guess_contest(), issuer="大赛组委会", date="")
+        self.field_rules = field_rules.build_rules(
+            keys, self._column_names(), context, existing)
+        self._render_mappings()
+        if not getattr(self, "mapping_open", True):
+            self.mapping_toggle.configure(text=f"展开映射（{len(self.field_rules)} 个字段）")
+
+    def _render_mappings(self) -> None:
+        for child in self.mapping_box.winfo_children():
+            child.destroy()
+        if not self.field_rules:
+            self.mapping_hint.configure(
+                text="选择奖状模板后，这里会列出模板里的占位符")
+            return
+        self.mapping_hint.configure(text="")
+        for rule in self.field_rules:
+            row = ctk.CTkFrame(self.mapping_box, fg_color="transparent")
+            row.pack(fill="x", pady=1)
+
+            ctk.CTkLabel(row, text=rule.key, width=self._px(52), anchor="w",
+                         font=self.font_small, text_color=INK).pack(side="left")
+            menu = ctk.CTkOptionMenu(
+                row, values=list(field_rules.SOURCE_LABELS.values()),
+                width=self._px(76), height=self._px(26), font=self.font_small,
+                dropdown_font=self.font_small, corner_radius=7,
+                fg_color="#F8FAFD", button_color="#E8ECF5",
+                button_hover_color="#DDE3EF", text_color=INK,
+                command=lambda value, r=rule: self._on_source_change(r, value),
+            )
+            menu.set(rule.source_label)
+            menu.pack(side="left", padx=(2, 4))
+
+            holder = ctk.CTkFrame(row, fg_color="transparent")
+            holder.pack(side="left", fill="x", expand=True)
+            self._build_mapping_value(holder, rule)
+
+    def _build_mapping_value(self, holder, rule) -> None:
+        height = self._px(26)
+        if rule.source == "auto":
+            ctk.CTkLabel(holder, text=field_rules.AUTO_FIELDS.get(rule.key, "自动取值"),
+                         font=self.font_small, text_color=MUTED, anchor="w",
+                         height=height).pack(fill="x")
+            return
+
+        if rule.source == "column":
+            names = self._column_names() or ["（先选择成绩表）"]
+            menu = ctk.CTkOptionMenu(
+                holder, values=names, font=self.font_small, dropdown_font=self.font_small,
+                height=height, corner_radius=7, fg_color="#F8FAFD",
+                button_color="#E8ECF5", button_hover_color="#DDE3EF", text_color=INK,
+                command=lambda value, r=rule: self._set_rule_value(r, value),
+            )
+            if rule.value not in names:
+                rule.value = names[0]
+            menu.set(rule.value)
+            menu.pack(fill="x")
+            return
+
+        if rule.source == "system_date":
+            ctk.CTkLabel(holder, text="每次生成使用当天", font=self.font_small,
+                         text_color=MUTED, anchor="w", height=height).pack(fill="x")
+            return
+
+        if rule.source == "fixed_date":
+            box = ctk.CTkFrame(holder, fg_color="transparent")
+            box.pack(fill="x")
+            var = ctk.StringVar(value=rule.value or date.today().isoformat())
+            entry = ctk.CTkEntry(box, textvariable=var, height=height,
+                                 font=self.font_small, corner_radius=7,
+                                 fg_color="#F8FAFD", border_width=1, border_color=LINE)
+            entry.pack(side="left", fill="x", expand=True)
+            ctk.CTkButton(
+                box, text="📅", width=self._px(28), height=height, corner_radius=7,
+                fg_color="#F3F5FA", hover_color="#E6EAF3", text_color=INK,
+                font=self.font_small,
+                command=lambda r=rule, v=var: self._pick_date(r, v),
+            ).pack(side="left", padx=(3, 0))
+            var.trace_add("write", lambda *_a, r=rule, v=var: self._set_rule_value(r, v.get()))
+            return
+
+        # 固定值
+        var = ctk.StringVar(value=rule.value)
+        entry = ctk.CTkEntry(holder, textvariable=var, height=height,
+                             font=self.font_small, corner_radius=7,
+                             fg_color="#F8FAFD", border_width=1, border_color=LINE,
+                             placeholder_text="填写固定内容")
+        entry.pack(fill="x")
+        var.trace_add("write", lambda *_a, r=rule, v=var: self._set_rule_value(r, v.get()))
+
+    def _on_source_change(self, rule, label: str) -> None:
+        rule.source = field_rules.LABEL_TO_SOURCE.get(label, "auto")
+        if rule.source == "column":
+            names = self._column_names()
+            if rule.value not in names:
+                rule.value = names[0] if names else ""
+        elif rule.source == "fixed_date" and not rule.value:
+            rule.value = date.today().isoformat()
+        elif rule.source == "auto":
+            rule.value = ""
+        self._render_mappings()
+        self._save_settings()
+
+    def _set_rule_value(self, rule, value: str) -> None:
+        rule.value = str(value)
+        self._save_settings()
+
+    def _pick_date(self, rule, var) -> None:
+        initial = date.today()
+        try:
+            initial = datetime.strptime(var.get().strip(), "%Y-%m-%d").date()
+        except ValueError:
+            pass
+
+        def apply(value):
+            var.set(value.isoformat())
+
+        DatePicker(self, initial=initial, on_pick=apply, font=self.font_small)
 
     # -------------------------------------------------------------- 奖项
     @staticmethod
@@ -1317,7 +1612,7 @@ class AwardStudio(ctk.CTk):
         threading.Thread(
             target=self._worker,
             args=(self.template_path, self.output_dir, winners, context,
-                  bool(self.merge_check.get())),
+                  bool(self.merge_check.get()), list(self.field_rules)),
             daemon=True,
         ).start()
         self.after(80, self._poll)
@@ -1338,7 +1633,8 @@ class AwardStudio(ctk.CTk):
                 return stem
         return "技能竞赛"
 
-    def _worker(self, template: Path, out_dir: Path, winners, context, merge: bool) -> None:
+    def _worker(self, template: Path, out_dir: Path, winners, context, merge: bool,
+                rules=None) -> None:
         created: list[Path] = []
         failures: list[str] = []
         try:
@@ -1346,7 +1642,7 @@ class AwardStudio(ctk.CTk):
             for entry in winners:
                 path = out_dir / certificate_filename(entry)
                 try:
-                    generate_certificate(template, path, entry, context)
+                    generate_certificate(template, path, entry, context, rules=rules)
                     created.append(path)
                     self.ui_queue.put(("log", f"{path.name} 已生成", "ok"))
                 except CertificateError as exc:
@@ -1445,9 +1741,14 @@ class AwardStudio(ctk.CTk):
             "1. 选择 Excel 成绩表：软件自动找表头、识别姓名列与分数列，并立即按分数排序。\n"
             "2. 选择 Word 奖状模板：在需要填字的位置写 {{姓名}}、{{名次}}，可加 {{奖项}}、"
             "{{比赛名称}}、{{日期}}、{{编号}}，以及表格里的任意列（如 {{班级}}）。\n"
-            "3. 设置奖项：可自定义奖项名称和人数（如「特等奖 1 名、一等奖 3 名」），"
+            "3. 字段映射：模板里每个占位符都会列出来，逐行指定取值方式——\n"
+            "   · 自动：姓名、名次、奖项、编号由软件算好\n"
+            "   · 表格列：从成绩表里挑一列（如把 {{班级}} 映射到「班级」列）\n"
+            "   · 固定值：自己填，比如主办方名称、比赛全称\n"
+            "   · 日期：用当天系统日期，或点日历选一个具体日期\n"
+            "4. 设置奖项：可自定义奖项名称和人数（如「特等奖 1 名、一等奖 3 名」），"
             "点「＋ 添加奖项」继续加；关掉「设置奖项等级」则只排名次，奖状里不填奖项。\n"
-            "4. 点「生成奖状」，每人一份 Word，文件名形如 01_张三_一等奖.docx。\n\n"
+            "5. 点「生成奖状」，每人一份 Word，文件名形如 01_张三_一等奖.docx。\n\n"
             "界面字号\n"
             "右上角中间的数字可以直接改：点进去输入 10–28 之间的数值，回车生效；"
             "也可以点 A- / A+ 逐级调整，或用键盘上下键微调。\n"
@@ -1458,7 +1759,8 @@ class AwardStudio(ctk.CTk):
             "· 表格前几行有标题、说明没关系，表头会在前 20 行内自动定位。\n"
             "· 没有「总分」列但有多位评委列时，分数自动相加。\n"
             "· 双击排名表里的某一行，可以直接打开已生成的那份奖状。\n"
-            "· 奖项按人数依次往下分，不按名次号，所以并列时也不会多发。"
+            "· 奖项按人数依次往下分，不按名次号，所以并列时也不会多发。\n"
+            "· 映射面板占地方，点「收起映射」可以折起来，需要时再展开。"
         )
         messagebox.showinfo("使用说明", text)
 
@@ -1470,14 +1772,7 @@ class AwardStudio(ctk.CTk):
             self.output_dir = DATA_DIR / "output" / "奖状"
             self._update_output_hint()
         if template.exists():
-            self.template_path = template
-            self.template_btn.configure(text=short(template.name, 24))
-            try:
-                keys = inspect_template(template)
-                self.template_hint.configure(text="占位符：" + "、".join(sorted(keys)))
-                self._log(f"模板已载入，可用字段：{'、'.join(sorted(keys))}", "ok")
-            except Exception:  # noqa: BLE001
-                pass
+            self._load_template(template)
         self._sync_buttons()
 
 
