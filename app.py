@@ -275,6 +275,7 @@ class AwardStudio(ctk.CTk):
         ]
         self.template_keys: list[str] = []
         self.column_names: list[str] = []
+        self.score_columns: list[str] = []
 
         self.awards = self._parse_awards(saved.get("awards"))
         self.award_mode = bool(saved.get("award_mode", True))
@@ -373,7 +374,7 @@ class AwardStudio(ctk.CTk):
             foreground=MUTED,
             relief="flat",
             borderwidth=0,
-            padding=(10, 10),
+            padding=(6, 8),
         )
         style.map(
             "Award.Treeview",
@@ -905,7 +906,7 @@ class AwardStudio(ctk.CTk):
         head.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(head, text="排名总览", font=self._mkfont("card_title", 14, "bold"),
                      text_color=INK, anchor="w").grid(row=0, column=0, sticky="w")
-        self.table_note = ctk.CTkLabel(head, text="同分并列名次，前三名高亮",
+        self.table_note = ctk.CTkLabel(head, text="同分并列名次 · 点击表头数字列可切换排名依据",
                                        font=self.font_small, text_color=MUTED, anchor="w")
         self.table_note.grid(row=1, column=0, sticky="w")
         self.merge_hint = ctk.CTkLabel(head, text="",
@@ -983,6 +984,8 @@ class AwardStudio(ctk.CTk):
         self.players = players
         self.excel_title = report.title
         self.column_names = list(players[0].fields.keys()) if players else []
+        self.score_columns = ["分数"]
+        self._apply_score_columns()
         self._build_table()
         self.excel_btn.configure(text=short(path.name, 24), text_color=INK)
         self.excel_hint.configure(
@@ -1549,6 +1552,87 @@ class AwardStudio(ctk.CTk):
             if top:
                 self._log(f"最高分 {top.player.score:g} · {top.player.name}", "info")
 
+    @staticmethod
+    def _to_number(text) -> float | None:
+        raw = str(text).strip().replace("分", "").replace(",", "").strip()
+        if not raw:
+            return None
+        try:
+            return float(raw)
+        except ValueError:
+            return None
+
+    def _numeric_value(self, player, key: str) -> float:
+        if key == "分数":
+            return float(player.raw_score)
+        value = self._to_number(player.fields.get(key, ""))
+        return value if value is not None else 0.0
+
+    def _is_numeric_column(self, key: str) -> bool:
+        """这一列能不能当排名依据（整列都是数值）。"""
+        if key in ("rank", "award", "total", "avg"):
+            return False
+        if key == "分数":
+            return True
+        if not self.players:
+            return False
+        seen = False
+        for player in self.players:
+            raw = str(player.fields.get(key, "")).strip()
+            if not raw:
+                continue
+            if self._to_number(raw) is None:
+                return False
+            seen = True
+        return seen
+
+    def _apply_score_columns(self) -> None:
+        """按勾选的列重算每个人的排名分；多列时同时算出合计与平均。"""
+        if not self.players:
+            return
+        columns = [key for key in self.score_columns if self._is_numeric_column(key)]
+        for player in self.players:
+            if not columns:
+                player.score = player.raw_score
+                player.total = player.raw_score
+                player.average = player.raw_score
+                continue
+            numbers = [self._numeric_value(player, key) for key in columns]
+            player.total = sum(numbers)
+            player.average = player.total / len(numbers)
+            player.score = numbers[0] if len(numbers) == 1 else player.total
+
+    def _on_heading_click(self, key: str) -> None:
+        if key in ("rank", "award", "total", "avg"):
+            return
+        if not self._is_numeric_column(key):
+            self._log(f"「{key}」不是可排序的数值列，不能作为排名依据", "warn")
+            return
+        if key in self.score_columns:
+            self.score_columns.remove(key)
+        elif key == "分数":
+            # 综合分本身就是多列之和，与其他列同时勾选没有意义，直接独占
+            self.score_columns = ["分数"]
+        else:
+            if "分数" in self.score_columns:
+                self.score_columns.remove("分数")
+            self.score_columns.append(key)
+        if not self.score_columns:
+            self._log("已取消全部勾选，按 Excel 里的综合分排名", "muted")
+        else:
+            names = "、".join(self.score_columns)
+            mode = "合计排名" if len(self.score_columns) > 1 else "该列排名"
+            self._log(f"排名依据：{names}（{mode}）", "info")
+        self._apply_score_columns()
+        self._build_table()
+        self._recalculate(keep_log=True)
+
+    def _heading_label(self, key: str, text: str) -> str:
+        """参与排名的列在标题前加 ✓，其余保持原样（表头空间紧张，标记尽量短）。"""
+        if key in self.score_columns:
+            return f"✓ {text}"
+        return text
+
     def _column_has_values(self, key: str) -> bool:
         for player in self.players:
             if str(player.fields.get(key, "")).strip():
@@ -1557,20 +1641,27 @@ class AwardStudio(ctk.CTk):
 
     def _table_column_specs(self) -> list[tuple]:
         """列由成绩表的实际字段决定：名次 + 原始各列 + 总分 + 奖项。"""
-        specs: list[tuple] = [("rank", "名次", 64, "center")]
+        specs: list[tuple] = [("rank", "名次", 84, "center")]
         if self.players:
+            multi = len(self.score_columns) > 1
             for key in self.players[0].fields:
                 if key == "分数":
+                    if multi:
+                        specs.append(("total", "合计", 112, "center"))
+                        specs.append(("avg", "平均", 104, "center"))
+                    else:
+                        # 单列勾选非综合分时，这一列其实是排名分
+                        single = len(self.score_columns) == 1 and "分数" not in self.score_columns
+                        specs.append(("分数", "排名分" if single else "总分", 112, "center"))
                     continue
                 # 整列都没有值的（比如表里没有编号）就不显示
                 if key != "姓名" and not self._column_has_values(key):
                     continue
-                width = {"姓名": 110, "编号": 90}.get(key, 130)
+                width = {"姓名": 110, "编号": 104}.get(key, 130)
                 if key.startswith("评委"):
-                    width = 84
+                    width = 118
                 anchor = "center" if key in ("编号",) or key.startswith("评委") else "w"
                 specs.append((key, key, width, anchor))
-            specs.append(("score", "总分", 84, "center"))
         else:
             specs += [("name", "姓名", 110, "w"), ("no", "编号", 90, "center"),
                       ("score", "总分", 84, "center")]
@@ -1590,17 +1681,28 @@ class AwardStudio(ctk.CTk):
         self.tree = ttk.Treeview(holder, columns=keys, show="headings", height=6,
                                  style="Award.Treeview", selectmode="browse")
         for key, text, width, anchor in self._table_columns:
-            self.tree.heading(key, text=text, anchor=anchor)
-            # 文本类列与奖项列承担富余宽度，数值列保持紧凑
-            stretch = anchor == "w" or key == "award"
-            self.tree.column(key, width=width, minwidth=48, anchor=anchor, stretch=stretch)
+            label = self._heading_label(key, text)
+            if key in ("rank", "award", "total", "avg"):
+                self.tree.heading(key, text=label, anchor=anchor)
+            else:
+                self.tree.heading(key, text=label, anchor=anchor,
+                                  command=lambda k=key: self._on_heading_click(k))
+            # 列宽写死，超出可视区时用横向滚动，避免挤压导到表头文字被截
+            self.tree.column(key, width=width, minwidth=48, anchor=anchor, stretch=False)
         self.tree.grid(row=0, column=0, sticky="nsew")
 
         self.table_scrollbar = ctk.CTkScrollbar(
             holder, command=self.tree.yview, fg_color="transparent",
             button_color="#D4D9E4", button_hover_color="#B9C0D0", width=10)
         self.table_scrollbar.grid(row=0, column=1, sticky="ns", padx=(2, 4))
-        self.tree.configure(yscrollcommand=self.table_scrollbar.set)
+        self.table_xscroll = ctk.CTkScrollbar(
+            holder, orientation="horizontal", command=self.tree.xview,
+            fg_color="transparent", button_color="#D4D9E4",
+            button_hover_color="#B9C0D0", height=10)
+        self.table_xscroll.grid(row=1, column=0, sticky="ew", pady=(2, 0))
+        holder.grid_rowconfigure(1, minsize=12)
+        self.tree.configure(yscrollcommand=self.table_scrollbar.set,
+                            xscrollcommand=self.table_xscroll.set)
 
         self.tree.tag_configure("first", background="#FFF8E6", foreground="#8A5A00")
         self.tree.tag_configure("second", background="#F4F7FB", foreground="#3A4A5F")
@@ -1609,6 +1711,7 @@ class AwardStudio(ctk.CTk):
         self.tree.tag_configure("normal", background=CARD, foreground=MUTED)
         self.tree.bind("<Double-1>", self._open_certificate)
         self._fit_columns()
+        self.after(40, self._fit_columns)
 
     def _show_empty_state(self, empty: bool) -> None:
         """没有数据时用占位提示替代空表格，避免看起来像残留。"""
@@ -1616,11 +1719,13 @@ class AwardStudio(ctk.CTk):
             if empty:
                 self.tree.grid_remove()
                 self.table_scrollbar.grid_remove()
+                self.table_xscroll.grid_remove()
                 self.empty_panel.grid()
             else:
                 self.empty_panel.grid_remove()
                 self.tree.grid()
                 self.table_scrollbar.grid()
+                self.table_xscroll.grid()
         except Exception:  # noqa: BLE001
             pass
 
@@ -1635,8 +1740,12 @@ class AwardStudio(ctk.CTk):
             award_text = (entry.award or "—") if entry.is_winner else "—"
             values = [entry.rank]
             for key, _text, _width, _anchor in self._table_columns[1:-1]:
-                if key == "score":
+                if key == "分数":
                     values.append(f"{entry.player.score:g}")
+                elif key == "total":
+                    values.append(f"{entry.player.total:g}")
+                elif key == "avg":
+                    values.append(f"{entry.player.average:.1f}")
                 else:
                     values.append(fields.get(key, "") or "—")
             values.append(award_text)
@@ -1892,6 +2001,8 @@ class AwardStudio(ctk.CTk):
             "· 没有「总分」列但有多位评委列时，分数自动相加。\n"
             "· 双击排名表里的某一行，可以直接打开已生成的那份奖状。\n"
             "· 排名表的列跟着成绩表走：表里有什么列就显示什么，整列没值的字段会自动省略。\n"
+            "· 排名依据可以改：点表头带数字的列（总分、各位评委分）给它打钩。"
+            "只勾一列就按那一列排序；勾多列会自动算出「合计」和「平均」并按合计排名。\n"
             "· 同分的选手一定拿同一个奖。如果同分人数超过某个奖项的名额，整组都会按该奖项发放，"
             "并在奖项设置下方提示你按实际人数改一下名额。\n"
             "· 映射面板占地方，点「收起映射」可以折起来，需要时再展开。"

@@ -61,6 +61,17 @@ class Player:
     no: str = ""
     extras: dict[str, str] = field(default_factory=dict)
     row: int = 0
+    # 原始综合分（Excel 里的总分，或多位评委之和），切换排名依据后可恢复
+    raw_score: float = 0.0
+    # 用户勾选多列排名时，这里放合计与平均
+    total: float = 0.0
+    average: float = 0.0
+
+    def __post_init__(self) -> None:
+        if not self.raw_score:
+            self.raw_score = self.score
+            self.total = self.score
+            self.average = self.score
 
     @property
     def fields(self) -> dict[str, str]:
@@ -329,6 +340,16 @@ def load_players(path: str | Path, sheet_name: str | None = None) -> tuple[list[
                 text = _cell_text(values[i])
                 if text:
                     extras[headers[i] or f"列{i + 1}"] = text
+        # 多个评委列被合并成总分时，保留每列原始分数，
+        # 这样用户还能在排名表里勾选某一位评委单独作为排名依据
+        if len(score_cols) > 1:
+            for i in score_cols:
+                if i >= len(values):
+                    continue
+                label = headers[i] or f"列{i + 1}"
+                text = _cell_text(values[i])
+                if text and label not in extras:
+                    extras[label] = text
 
         players.append(
             Player(
