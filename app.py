@@ -1562,6 +1562,8 @@ class AwardStudio(ctk.CTk):
             top = self.entries[0] if self.entries else None
             if top:
                 self._log(f"最高分 {top.player.score:g} · {top.player.name}", "info")
+        elif not keep_log:
+            self._log("还没选评判列：点表头数字列勾选后才会排名、分奖", "muted")
 
     @staticmethod
     def _to_number(text) -> float | None:
@@ -1629,7 +1631,7 @@ class AwardStudio(ctk.CTk):
                 self.score_columns.remove("分数")
             self.score_columns.append(key)
         if not self.score_columns:
-            self._log("已取消全部勾选，按 Excel 里的综合分排名", "muted")
+            self._log("已取消全部勾选：不再排序，列表回到表格原始顺序", "muted")
         else:
             names = "、".join(self.score_columns)
             mode = "合计排名" if len(self.score_columns) > 1 else "该列排名"
@@ -1840,7 +1842,11 @@ class AwardStudio(ctk.CTk):
         else:
             self.stat_values["max"].configure(text=f"{max(scores):g}")
             self.stat_values["avg"].configure(text=f"{sum(scores) / len(scores):.1f}")
-        self.stat_values["awards"].configure(text=str(len(winners)))
+        self.stat_values["awards"].configure(text=str(len(winners)) if self.score_columns else "—")
+        if not self.score_columns:
+            # 没选评判列就没有名次，也就没有奖项可分配
+            self.merge_hint.configure(text="未选评判列 · 暂不分配奖项")
+            return
         if bool(self.award_switch.get()):
             tiers: dict[str, int] = {}
             for entry in winners:
@@ -1866,6 +1872,13 @@ class AwardStudio(ctk.CTk):
             return
         if not self.template_path:
             messagebox.showinfo("还差一步", "请先选择 Word 奖状模板。")
+            return
+        if not self.score_columns:
+            messagebox.showinfo(
+                "还没选排名依据",
+                "请在「排名总览」里点击表头上带数字的列，勾选至少一列作为评判依据，\n"
+                "勾选后程序才会排名并分配奖项。",
+            )
             return
         winners = winners_of(self.entries)
         if not winners:
@@ -2012,7 +2025,7 @@ class AwardStudio(ctk.CTk):
     def _show_help(self) -> None:
         text = (
             "使用步骤\n"
-            "1. 选择 Excel 成绩表：软件自动找表头、识别姓名列与分数列，并立即按分数排序。\n"
+            "1. 选择 Excel 成绩表：软件自动找表头、识别姓名列与分数列，按表格原始顺序列出全部选手。\n"
             "2. 选择 Word 奖状模板：在需要填字的位置写 {{姓名}}、{{名次}}，可加 {{奖项}}、"
             "{{比赛名称}}、{{日期}}、{{编号}}，以及表格里的任意列（如 {{班级}}）。\n"
             "3. 字段映射：模板里每个占位符都会列出来，逐行指定取值方式——\n"
@@ -2036,8 +2049,10 @@ class AwardStudio(ctk.CTk):
             "· 没有「总分」列但有多位评委列时，分数自动相加。\n"
             "· 双击排名表里的某一行，可以直接打开已生成的那份奖状。\n"
             "· 排名表的列跟着成绩表走：表里有什么列就显示什么，整列没值的字段会自动省略。\n"
-            "· 排名依据可以改：点表头带数字的列（总分、各位评委分）给它打钩。"
+            "· 排名依据全由你定：点表头带数字的列（总分、各位评委分）给它打钩。"
             "只勾一列就按那一列排序；勾多列会自动算出「合计」和「平均」并按合计排名。\n"
+            "· 一列都没勾时程序完全不排序：名次、奖项都显示「—」，行顺序就是 Excel 里的原始顺序，"
+            "生成按钮也是灰的。再点一次表头可以取消勾选、回到原始顺序。\n"
             "· 同分的选手一定拿同一个奖。如果同分人数超过某个奖项的名额，整组都会按该奖项发放，"
             "并在奖项设置下方提示你按实际人数改一下名额。\n"
             "· 映射面板占地方，点「收起映射」可以折起来，需要时再展开。"
