@@ -2,6 +2,8 @@
 
 读一张 Excel 成绩表，自动按分数排名，再按 Word 模板给前 N 名批量生成奖状。界面用 CustomTkinter 写成，浅色、圆角卡片风格，双击即用。
 
+![Award Studio](docs/promo.jpg)
+
 ![界面](docs/screenshot.png)
 
 ## 它能做什么
