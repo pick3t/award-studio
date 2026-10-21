@@ -297,9 +297,20 @@ class AwardStudio(ctk.CTk):
                       fg_color="transparent", hover_color="#E9EEF7", text_color=INK,
                       font=self.font_small, command=lambda: self._change_scale(-1)
                       ).pack(side="left", padx=(3, 0), pady=2)
-        self.scale_label = ctk.CTkLabel(font_box, text=f"{self.font_size} pt",
-                                        font=self.font_small, text_color=MUTED, width=52)
-        self.scale_label.pack(side="left")
+        self.scale_var = ctk.StringVar(value=str(self.font_size))
+        self.scale_entry = ctk.CTkEntry(
+            font_box, textvariable=self.scale_var, width=46, height=26, corner_radius=6,
+            justify="center", font=self.font_small,
+            fg_color="#FFFFFF", border_width=1, border_color=LINE,
+        )
+        self.scale_entry.pack(side="left", padx=(4, 2), pady=3)
+        self.scale_entry.bind("<Return>", self._on_scale_entry)
+        self.scale_entry.bind("<KP_Enter>", self._on_scale_entry)
+        self.scale_entry.bind("<FocusOut>", self._on_scale_entry)
+        self.scale_entry.bind("<Up>", lambda _e: self._change_scale(1))
+        self.scale_entry.bind("<Down>", lambda _e: self._change_scale(-1))
+        ctk.CTkLabel(font_box, text="pt", font=self.font_small, text_color=MUTED).pack(
+            side="left", padx=(0, 4))
         ctk.CTkButton(font_box, text="A+", width=30, height=30, corner_radius=7,
                       fg_color="transparent", hover_color="#E9EEF7", text_color=INK,
                       font=self.font_small, command=lambda: self._change_scale(1)
@@ -414,14 +425,24 @@ class AwardStudio(ctk.CTk):
         except Exception:  # noqa: BLE001 - 控件还没建好时跳过
             return
 
+    def _is_maximized(self) -> bool:
+        try:
+            import ctypes
+
+            return bool(ctypes.windll.user32.IsZoomed(int(self.frame(), 16)))
+        except Exception:  # noqa: BLE001
+            return False
+
     def _capture_window_size(self) -> None:
-        """记住当前窗口尺寸（用户手动拉大过也会被记住）。"""
+        """记住当前窗口尺寸（手动拉大过也会记住；最大化时不记，避免把屏幕尺寸当窗口尺寸）"""
+        if self._is_maximized():
+            return
         try:
             self.update_idletasks()
+            scale = self._get_window_scaling() or 1.0
             width, height = self.winfo_width(), self.winfo_height()
-            if not getattr(sys, "frozen", False):
-                scale = self._get_window_scaling() or 1.0
-                width, height = int(width / scale), int(height / scale)
+            # winfo 与 geometry 的单位差一个缩放系数，源码与打包环境都一样换算
+            width, height = int(width / scale), int(height / scale)
             if width > 200 and height > 200:
                 self._win_size = (width, height)
         except Exception:  # noqa: BLE001
@@ -430,6 +451,23 @@ class AwardStudio(ctk.CTk):
     def _on_window_resize(self, event) -> None:
         if event.widget is not self:
             return
+
+        maximized = self._is_maximized()
+        was = getattr(self, "_was_maximized", False)
+        self._was_maximized = maximized
+        if was and not maximized:
+            # 刚从最大化还原：锁回到最大化之前的窗口尺寸
+            self.after(90, self._restore_window_size)
+        elif not maximized:
+            # 用户拖动改变尺寸后记住它，下次切字号或还原时用这个大小
+            job = getattr(self, "_remember_job", None)
+            if job is not None:
+                try:
+                    self.after_cancel(job)
+                except Exception:  # noqa: BLE001
+                    pass
+            self._remember_job = self.after(600, self._capture_window_size)
+
         job = getattr(self, "_resize_job", None)
         if job is not None:
             try:
@@ -455,7 +493,7 @@ class AwardStudio(ctk.CTk):
 
     def _restore_window_size(self) -> None:
         size = getattr(self, "_win_size", None)
-        if not size:
+        if not size or self._is_maximized():
             return
         try:
             if getattr(sys, "frozen", False):
@@ -479,15 +517,30 @@ class AwardStudio(ctk.CTk):
             del_btn.configure(width=px(26), height=px(28))
 
     def _change_scale(self, delta: int) -> None:
-        size = max(FONT_SIZE_MIN, min(FONT_SIZE_MAX, self.font_size + delta))
+        self._set_font_size(self.font_size + delta)
+
+    def _on_scale_entry(self, event=None) -> None:
+        raw = self.scale_var.get().strip().lower().replace("pt", "").strip()
+        try:
+            size = int(float(raw))
+        except ValueError:
+            self.scale_var.set(str(self.font_size))
+            return
+        if size == self.font_size:
+            self.scale_var.set(str(self.font_size))
+            return
+        self._set_font_size(size)
+
+    def _set_font_size(self, size: int) -> None:
+        size = max(FONT_SIZE_MIN, min(FONT_SIZE_MAX, int(size)))
+        self.scale_var.set(str(size))
         if size == self.font_size:
             return
         if self._scale_job is None:
             self._capture_window_size()
         self.font_size = size
         self.text_scale = size / FONT_SIZE_DEFAULT
-        self.scale_label.configure(text=f"{size} pt")
-        # 连续点击时只渲染最后一次，避免每次都全量重排
+        # 连续点击/输入时只渲染最后一次，避免每次都全量重排
         if self._scale_job is not None:
             try:
                 self.after_cancel(self._scale_job)
@@ -1396,9 +1449,10 @@ class AwardStudio(ctk.CTk):
             "点「＋ 添加奖项」继续加；关掉「设置奖项等级」则只排名次，奖状里不填奖项。\n"
             "4. 点「生成奖状」，每人一份 Word，文件名形如 01_张三_一等奖.docx。\n\n"
             "界面字号\n"
-            "右上角的 A- / A+ 调整界面字号，范围 10–28 pt（默认 12 pt）。"
-            "窗口和控件会跟着一起放大，超出屏幕时自动贴合屏幕，左侧设置区可上下滚动。"
-            "选择会自动记住，下次打开保持这个字号。\n\n"
+            "右上角中间的数字可以直接改：点进去输入 10–28 之间的数值，回车生效；"
+            "也可以点 A- / A+ 逐级调整，或用键盘上下键微调。\n"
+            "调字号不会改变窗口大小，超出空间的文字会省略、左侧设置区可滚动；"
+            "字号较大时建议先最大化窗口，表格列会自动铺开。\n\n"
             "小技巧\n"
             "· 成绩表和奖状模板都可以直接从资源管理器拖进窗口，不必点按钮选路径。\n"
             "· 表格前几行有标题、说明没关系，表头会在前 20 行内自动定位。\n"
