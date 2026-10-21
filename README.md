@@ -18,6 +18,24 @@
 
 ![奖状效果](docs/证书预览.png)
 
+## 下载安装
+
+到 [Releases](https://github.com/pick3t/award-studio/releases/latest) 直接下现成的：
+
+| 平台 | 文件 | 打开方式 |
+|---|---|---|
+| Windows 10 / 11（64 位） | `AwardStudio.exe` | 双击运行 |
+| macOS（Apple Silicon） | `AwardStudio-macOS.zip` | 解压后把 `AwardStudio.app` 拖进「应用程序」 |
+
+两个包都没做代码签名，所以：
+
+- **Windows** 首次运行会提示「已保护你的电脑」，点「更多信息 → 仍要运行」即可
+- **macOS** 首次会被 Gatekeeper 拦住，在 Finder 里**右键**点 App → 打开 → 再点「打开」，或执行一次 `xattr -dr com.apple.quarantine /Applications/AwardStudio.app`
+
+> macOS 目前只构建 Apple Silicon（M 系列）版本。Intel Mac 可以 clone 仓库后 `python app.py` 运行，或把 `.github/workflows/build.yml` 里的 `macos-latest` 改成 `macos-13` 自行构建。
+>
+> 打 `v*` 标签会自动触发 Actions 构建两个平台并附加到 Release；也可以在 Actions 页面手动运行 `Build Release`。
+
 ## 快速开始
 
 **方式一：直接运行 exe（推荐给非开发同学）**
