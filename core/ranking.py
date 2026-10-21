@@ -39,10 +39,7 @@ class RankedEntry:
 
 
 def award_for_rank(rank: int, winners: int, use_tiers: bool = True) -> str:
-    """按名次给出奖项名称。
-
-    前 n 名三等分：一等奖 / 二等奖 / 三等奖。n < 3 或关闭分档时统一为一等奖。
-    """
+    """默认的三等分规则：一等奖 / 二等奖 / 三等奖。"""
     if not use_tiers or winners < 3:
         return "一等奖"
     first_cut = max(1, math.ceil(winners / 3))
@@ -54,9 +51,42 @@ def award_for_rank(rank: int, winners: int, use_tiers: bool = True) -> str:
     return "三等奖"
 
 
-def rank_players(players: list[Player], winners: int = 5, use_tiers: bool = True) -> list[RankedEntry]:
-    """按分数降序排名，同分并列（1、2、2、4），并标记前 n 名为获奖者。"""
+def build_slots(winners: int, use_tiers: bool, award_tiers=None) -> list[str]:
+    """按奖项设置生成「每个名额对应什么奖」的列表。
+
+    award_tiers 形如 [("特等奖", 1), ("一等奖", 3)]，按顺序占名额。
+    不设奖项时返回空列表，此时名额由 winners 决定。
+    """
+    if not use_tiers:
+        return []
+    if award_tiers:
+        slots: list[str] = []
+        for name, count in award_tiers:
+            try:
+                number = int(count)
+            except (TypeError, ValueError):
+                continue
+            name = str(name).strip() or "奖项"
+            slots.extend([name] * max(0, number))
+        return slots
+    return [award_for_rank(position, winners, True) for position in range(1, max(0, winners) + 1)]
+
+
+def rank_players(
+    players: list[Player],
+    winners: int = 5,
+    use_tiers: bool = True,
+    award_tiers=None,
+) -> list[RankedEntry]:
+    """按分数降序排名，同分并列（1、2、2、4）。
+
+    award_tiers 为自定义奖项（名称 + 人数），按排序位置依次分配；
+    传 None 时沿用三等分；use_tiers=False 时只排名次、不留奖项。
+    """
     ordered = sorted(players, key=lambda p: (-p.score, p.name))
+    slots = build_slots(winners, use_tiers, award_tiers)
+    quota = len(slots) if slots else max(0, winners)
+
     entries: list[RankedEntry] = []
     previous_score: float | None = None
     previous_rank = 0
@@ -71,16 +101,22 @@ def rank_players(players: list[Player], winners: int = 5, use_tiers: bool = True
             RankedEntry(
                 rank=rank,
                 player=player,
-                award=award_for_rank(rank, winners, use_tiers),
-                is_winner=index <= winners,
+                award=slots[index - 1] if index <= len(slots) else "",
+                is_winner=index <= quota,
             )
         )
     return entries
 
 
-def winners_of(entries: list[RankedEntry], winners: int) -> list[RankedEntry]:
-    """取前 n 名（按排序位置，而不是名次号，避免并列导致超额）。"""
-    return [e for e in entries if e.is_winner][:winners]
+def winners_of(entries: list[RankedEntry], winners: int | None = None) -> list[RankedEntry]:
+    """取获奖者（按排序位置，而不是名次号，避免并列导致超额）。
+
+    winners 为 None 时直接返回全部获奖者，不额外截断。
+    """
+    result = [e for e in entries if e.is_winner]
+    if winners is None:
+        return result
+    return result[:winners]
 
 
 def safe_filename(text: str, fallback: str = "certificate") -> str:

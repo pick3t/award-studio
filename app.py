@@ -65,6 +65,13 @@ FONT = "Microsoft YaHei UI"
 FONT_SCALES = (0.85, 1.0, 1.12, 1.25)
 FONT_SCALE_LABELS = ("小", "标准", "大", "特大")
 
+# 首次启动的奖项方案
+DEFAULT_AWARDS = [
+    {"name": "一等奖", "count": 1},
+    {"name": "二等奖", "count": 2},
+    {"name": "三等奖", "count": 3},
+]
+
 
 def short(text: str, limit: int = 20) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
@@ -111,6 +118,7 @@ class AwardStudio(ctk.CTk):
         self.players = []
         self.entries = []
         self.winners = 5
+        self.quota = 5
         self.max_winners = 20
         self.excel_title = ""
         self.ui_queue: queue.Queue = queue.Queue()
@@ -125,6 +133,9 @@ class AwardStudio(ctk.CTk):
         self.text_scale_index = max(0, min(len(FONT_SCALES) - 1, index))
         self.text_scale = FONT_SCALES[self.text_scale_index]
         self._fonts: dict[str, tuple] = {}
+
+        self.awards = self._parse_awards(saved.get("awards"))
+        self.award_mode = bool(saved.get("award_mode", True))
 
         self.font_h1 = self._mkfont("h1", 19, "bold")
         self.font_sub = self._mkfont("sub", 11)
@@ -309,6 +320,8 @@ class AwardStudio(ctk.CTk):
     def _save_settings(self) -> None:
         data = prefs.load()
         data["text_scale_index"] = self.text_scale_index
+        data["award_mode"] = bool(self.award_switch.get())
+        data["awards"] = [{"name": item["name"], "count": item["count"]} for item in self.awards]
         prefs.save(data)
 
     def _build_left(self, parent) -> None:
@@ -371,29 +384,63 @@ class AwardStudio(ctk.CTk):
                                           wraplength=286)
         self.template_hint.pack(fill="x")
 
-        # ③ 名额
-        self._step_title(wrap, "③", "获奖名额", "前 N 名自动生成奖状")
-        qty = ctk.CTkFrame(wrap, fg_color="transparent")
-        qty.pack(fill="x", pady=(8, 0))
-        self.qty_label = ctk.CTkLabel(qty, text="5", font=self._mkfont("qty", 20, "bold", "Segoe UI"),
+        # ③ 奖项
+        self._step_title(wrap, "③", "奖项设置", "自定义奖项名称与人数")
+
+        self.award_switch = ctk.CTkSwitch(
+            wrap, text="设置奖项等级", font=self.font_small,
+            text_color=MUTED, progress_color=PRIMARY, command=self._on_award_toggle,
+        )
+        if self.award_mode:
+            self.award_switch.select()
+        else:
+            self.award_switch.deselect()
+        self.award_switch.pack(anchor="w", pady=(8, 2))
+
+        self.award_area = ctk.CTkFrame(wrap, fg_color="transparent")
+        self.award_area.pack(fill="x")
+
+        # A) 奖项列表（开启「设置奖项等级」时显示）
+        self.awards_panel = ctk.CTkFrame(self.award_area, fg_color="transparent")
+        self.awards_box = ctk.CTkFrame(self.awards_panel, fg_color="transparent")
+        self.awards_box.pack(fill="x", pady=(4, 0))
+        self.add_award_btn = ctk.CTkButton(
+            self.awards_panel, text="＋ 添加奖项", height=28, corner_radius=8,
+            fg_color="#F8FAFD", hover_color="#EFF3FA", text_color=PRIMARY,
+            border_width=1, border_color=LINE, font=self.font_small,
+            command=self._add_award,
+        )
+        self.add_award_btn.pack(fill="x", pady=(6, 0))
+        self.award_total = ctk.CTkLabel(
+            self.awards_panel, text="", font=self.font_small, text_color=MUTED, anchor="w",
+        )
+        self.award_total.pack(fill="x", pady=(4, 0))
+
+        # B) 仅排名次（关闭奖项时显示）
+        self.qty_panel = ctk.CTkFrame(self.award_area, fg_color="transparent")
+        qty = ctk.CTkFrame(self.qty_panel, fg_color="transparent")
+        qty.pack(fill="x", pady=(6, 0))
+        self.qty_label = ctk.CTkLabel(qty, text="5",
+                                      font=self._mkfont("qty", 20, "bold", "Segoe UI"),
                                       text_color=PRIMARY, anchor="w")
         self.qty_label.pack(side="left")
         ctk.CTkLabel(qty, text="名", font=self.font_small, text_color=MUTED).pack(
-            side="left", padx=(6, 14))
+            side="left", padx=(6, 12))
         self.slider = ctk.CTkSlider(
             qty, from_=1, to=20, number_of_steps=19, height=18,
             fg_color="#E6E9F2", progress_color=PRIMARY, button_color=PRIMARY,
             button_hover_color=PRIMARY_HOVER, command=self._on_slider,
         )
         self.slider.set(5)
-        self.slider.pack(side="left", fill="x", expand=True, padx=(10, 0))
-
-        self.tier_switch = ctk.CTkSwitch(
-            wrap, text="按名次自动划分一 / 二 / 三等奖", font=self.font_small,
-            text_color=MUTED, progress_color=PRIMARY, command=self._on_tier_toggle,
+        self.slider.pack(side="left", fill="x", expand=True)
+        self.qty_hint = ctk.CTkLabel(
+            self.qty_panel, text="只排名次，奖状里不填奖项等级",
+            font=self.font_small, text_color=MUTED, anchor="w", justify="left",
+            wraplength=286,
         )
-        self.tier_switch.select()
-        self.tier_switch.pack(anchor="w", pady=(4, 0))
+        self.qty_hint.pack(fill="x", pady=(4, 0))
+
+        self._sync_award_ui()
 
         # ④ 输出
         self._step_title(wrap, "④", "输出位置", "每人生成一份，可选合并版")
@@ -619,15 +666,144 @@ class AwardStudio(ctk.CTk):
         if self.players:
             self._recalculate(keep_log=True)
 
-    def _on_tier_toggle(self) -> None:
+    # -------------------------------------------------------------- 奖项
+    @staticmethod
+    def _parse_awards(raw) -> list[dict]:
+        result: list[dict] = []
+        if isinstance(raw, list):
+            for item in raw:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name", "")).strip()
+                if not name:
+                    continue
+                try:
+                    count = int(item.get("count", 1))
+                except (TypeError, ValueError):
+                    count = 1
+                result.append({"name": name, "count": max(1, count)})
+        return result or [dict(item) for item in DEFAULT_AWARDS]
+
+    def _award_total_count(self) -> int:
+        return sum(max(0, int(item["count"])) for item in self.awards)
+
+    def _sync_award_ui(self) -> None:
+        """按开关状态切换「奖项列表」与「仅排名次」两套控件。"""
+        on = bool(self.award_switch.get())
+        self.awards_panel.pack_forget()
+        self.qty_panel.pack_forget()
+        if on:
+            self.awards_panel.pack(fill="x")
+            self._render_awards()
+        else:
+            self.qty_panel.pack(fill="x")
+        self._update_award_total()
+
+    def _update_award_total(self) -> None:
+        on = bool(self.award_switch.get())
+        if not on:
+            self.award_total.configure(text="")
+            return
+        total = self._award_total_count()
+        text = f"共 {total} 份奖状"
+        if self.players and total > len(self.players):
+            text += f"（实际只有 {len(self.players)} 人，超出部分自动忽略）"
+        self.award_total.configure(text=text,
+                                   text_color=WARNING if self.players and total > len(self.players)
+                                   else MUTED)
+
+    def _render_awards(self) -> None:
+        for child in self.awards_box.winfo_children():
+            child.destroy()
+        for index, item in enumerate(self.awards):
+            row = ctk.CTkFrame(self.awards_box, fg_color="transparent")
+            row.pack(fill="x", pady=2)
+
+            name_var = ctk.StringVar(value=item["name"])
+            count_var = ctk.StringVar(value=str(item["count"]))
+            entry = ctk.CTkEntry(
+                row, textvariable=name_var, height=30, corner_radius=8,
+                fg_color="#F8FAFD", border_width=1, border_color=LINE,
+                font=self.font_small, placeholder_text="奖项名称",
+            )
+            entry.pack(side="left", fill="x", expand=True)
+            count_entry = ctk.CTkEntry(
+                row, textvariable=count_var, width=46, height=30, corner_radius=8,
+                fg_color="#F8FAFD", border_width=1, border_color=LINE,
+                font=self.font_small, justify="center",
+            )
+            count_entry.pack(side="left", padx=(6, 4))
+            ctk.CTkButton(
+                row, text="×", width=26, height=28, corner_radius=8,
+                fg_color="transparent", hover_color="#FBE9E9", text_color="#B91C1C",
+                font=self.font_small, command=lambda i=index: self._remove_award(i),
+            ).pack(side="left")
+
+            name_var.trace_add(
+                "write",
+                lambda *_a, i=index, var=name_var: self._update_award(i, "name", var.get()),
+            )
+            count_var.trace_add(
+                "write",
+                lambda *_a, i=index, var=count_var: self._update_award(i, "count", var.get()),
+            )
+
+    def _update_award(self, index: int, field: str, value: str) -> None:
+        if index >= len(self.awards):
+            return
+        if field == "name":
+            self.awards[index]["name"] = value
+        else:
+            try:
+                number = int(value)
+            except ValueError:
+                number = 0
+            self.awards[index]["count"] = max(0, number)
+        self._update_award_total()
+        self._save_settings()
         if self.players:
             self._recalculate(keep_log=True)
+
+    def _add_award(self) -> None:
+        self.awards.append({"name": f"奖项 {len(self.awards) + 1}", "count": 1})
+        self.award_switch.select()
+        self.award_mode = True
+        self._sync_award_ui()
+        self._save_settings()
+        if self.players:
+            self._recalculate(keep_log=True)
+
+    def _remove_award(self, index: int) -> None:
+        if 0 <= index < len(self.awards):
+            self.awards.pop(index)
+        self._sync_award_ui()
+        self._save_settings()
+        if self.players:
+            self._recalculate(keep_log=True)
+
+    def _on_award_toggle(self) -> None:
+        self.award_mode = bool(self.award_switch.get())
+        self._sync_award_ui()
+        self._save_settings()
+        if self.players:
+            self._recalculate(keep_log=True)
+        self._log("奖项等级：开启" if self.award_mode else "奖项等级：关闭，只填名次", "muted")
 
     def _recalculate(self, keep_log: bool = False) -> None:
         if not self.players:
             return
-        self.entries = rank_players(self.players, winners=self.winners,
-                                    use_tiers=bool(self.tier_switch.get()))
+        tiers: list[tuple[str, int]] = []
+        if bool(self.award_switch.get()):
+            tiers = [(item["name"].strip() or "奖项", max(0, int(item["count"])))
+                     for item in self.awards]
+        quota = sum(count for _name, count in tiers) if tiers else self.winners
+        self.quota = quota
+        self.entries = rank_players(
+            self.players,
+            winners=quota,
+            use_tiers=bool(tiers),
+            award_tiers=tiers,
+        )
         self._refresh_table()
         self._refresh_stats()
         if not keep_log:
@@ -639,7 +815,7 @@ class AwardStudio(ctk.CTk):
         self.tree.delete(*self.tree.get_children())
         for index, entry in enumerate(self.entries):
             extras = entry.player.extras
-            award_text = entry.award if entry.is_winner else "—"
+            award_text = (entry.award or "—") if entry.is_winner else "—"
             values = (
                 entry.rank,
                 entry.player.name,
@@ -667,16 +843,20 @@ class AwardStudio(ctk.CTk):
                 label.configure(text="—")
             return
         scores = [p.score for p in self.players]
-        winners = winners_of(self.entries, self.winners)
+        winners = winners_of(self.entries)
         self.stat_values["total"].configure(text=str(len(self.players)))
         self.stat_values["max"].configure(text=f"{max(scores):g}")
         self.stat_values["avg"].configure(text=f"{sum(scores) / len(scores):.1f}")
         self.stat_values["awards"].configure(text=str(len(winners)))
-        tiers = {}
-        for entry in winners:
-            tiers[entry.award] = tiers.get(entry.award, 0) + 1
-        parts = " · ".join(f"{k} {v} 人" for k, v in tiers.items())
-        self.merge_hint.configure(text=parts if self.tier_switch.get() else "")
+        if bool(self.award_switch.get()):
+            tiers: dict[str, int] = {}
+            for entry in winners:
+                key = entry.award or "未定奖项"
+                tiers[key] = tiers.get(key, 0) + 1
+            parts = " · ".join(f"{name} {count} 人" for name, count in tiers.items())
+            self.merge_hint.configure(text=parts)
+        else:
+            self.merge_hint.configure(text=f"仅排名次 · 前 {len(winners)} 名")
 
     def _sync_buttons(self) -> None:
         ready = bool(self.excel_path and self.template_path and not self.busy)
@@ -693,7 +873,7 @@ class AwardStudio(ctk.CTk):
         if not self.template_path:
             messagebox.showinfo("还差一步", "请先选择 Word 奖状模板。")
             return
-        winners = winners_of(self.entries, self.winners)
+        winners = winners_of(self.entries)
         if not winners:
             messagebox.showinfo("没有获奖者", "请设置大于 0 的获奖名额。")
             return
@@ -840,7 +1020,8 @@ class AwardStudio(ctk.CTk):
             "1. 选择 Excel 成绩表：软件自动找表头、识别姓名列与分数列，并立即按分数排序。\n"
             "2. 选择 Word 奖状模板：在需要填字的位置写 {{姓名}}、{{名次}}，可加 {{奖项}}、"
             "{{比赛名称}}、{{日期}}、{{编号}}，以及表格里的任意列（如 {{班级}}）。\n"
-            "3. 拖动滑块设置前 N 名，开启分档后自动划分一 / 二 / 三等奖。\n"
+            "3. 设置奖项：可自定义奖项名称和人数（如「特等奖 1 名、一等奖 3 名」），"
+            "点「＋ 添加奖项」继续加；关掉「设置奖项等级」则只排名次，奖状里不填奖项。\n"
             "4. 点「生成奖状」，每人一份 Word，文件名形如 01_张三_一等奖.docx。\n\n"
             "界面字号\n"
             "右上角的 A- / A+ 可以把界面文字调小或调大（85% / 100% / 112% / 125%），"
@@ -848,7 +1029,8 @@ class AwardStudio(ctk.CTk):
             "小技巧\n"
             "· 表格前几行有标题、说明没关系，表头会在前 20 行内自动定位。\n"
             "· 没有「总分」列但有多位评委列时，分数自动相加。\n"
-            "· 双击排名表里的某一行，可以直接打开已生成的那份奖状。"
+            "· 双击排名表里的某一行，可以直接打开已生成的那份奖状。\n"
+            "· 奖项按人数依次往下分，不按名次号，所以并列时也不会多发。"
         )
         messagebox.showinfo("使用说明", text)
 

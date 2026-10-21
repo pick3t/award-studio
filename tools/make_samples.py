@@ -280,11 +280,7 @@ def make_certificate_template(path: Path) -> Path:
     _set_font(run, "楷体", 18, color="1A1A1A")
     run = p.add_run("{{奖项}}")
     _set_font(run, "黑体", 20, bold=True, color="9C2B2B", eastasia="黑体")
-    run = p.add_run("（第 ")
-    _set_font(run, "楷体", 18, color="1A1A1A")
-    run = p.add_run("{{名次}}")
-    _set_font(run, "Times New Roman", 20, bold=True, color="9C2B2B", eastasia="黑体")
-    run = p.add_run(" 名）。特发此证，以资鼓励。")
+    run = p.add_run("。特发此证，以资鼓励。")
     _set_font(run, "楷体", 18, color="1A1A1A")
     for key, value in body_format.items():
         setattr(p.paragraph_format, key, value)

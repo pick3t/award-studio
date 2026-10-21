@@ -148,8 +148,9 @@ def build_mapping(entry: RankedEntry, context: CertificateContext) -> dict[str, 
         "rank": str(entry.rank),
         "名次中文": entry.rank_cn,
         "第几名": entry.rank_cn,
-        "奖项": entry.award,
-        "award": entry.award,
+        # 不设奖项时用它填「第一名」这样的名次说法，模板里写「荣获 {{奖项}}」两种模式都通顺
+        "奖项": entry.award or entry.rank_cn,
+        "award": entry.award or entry.rank_cn,
         "编号": player.no,
         "no": player.no,
         "比赛名称": context.contest,
@@ -200,8 +201,11 @@ def generate_certificate(
 
 
 def certificate_filename(entry: RankedEntry) -> str:
-    """奖状文件名：01_张三_一等奖.docx"""
-    return f"{entry.rank:02d}_{safe_filename(entry.player.name)}_{entry.award}.docx"
+    """奖状文件名：01_张三_一等奖.docx（不设奖项时省略奖项部分）"""
+    parts = [f"{entry.rank:02d}", safe_filename(entry.player.name)]
+    if entry.award:
+        parts.append(safe_filename(entry.award))
+    return "_".join(parts) + ".docx"
 
 
 def merge_documents(paths: list[Path], output: str | Path) -> None:

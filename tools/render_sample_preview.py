@@ -120,10 +120,7 @@ def render(out: Path) -> None:
     runs2 = [
         {"text": "荣获 ", "font": FONT_KAI, "size": body, "color": INK},
         {"text": "一等奖", "font": FONT_HEI, "size": name_size, "color": RED, "bold": True},
-        {"text": "（第 ", "font": FONT_KAI, "size": body, "color": INK},
-        {"text": "1", "font": FONT_TIMES_B, "size": name_size, "color": RED, "bold": True},
-        {"text": " 名）。特发此证，以资鼓励。", "font": FONT_KAI, "size": body,
-         "color": INK},
+        {"text": "。特发此证，以资鼓励。", "font": FONT_KAI, "size": body, "color": INK},
     ]
     draw_runs(draw, left + indent, baseline, runs2)
     y = baseline + px(body) * 0.4

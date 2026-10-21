@@ -81,7 +81,7 @@ def main() -> int:
 
     print("3) 奖状模板")
     keys = inspect_template(template)
-    check({"姓名", "名次"} <= keys, f"模板包含 姓名/名次 占位符：{sorted(keys)}")
+    check({"姓名", "奖项"} <= keys, f"模板包含 姓名/奖项 占位符：{sorted(keys)}")
 
     print("4) 生成奖状")
     if OUTPUT.exists():
@@ -106,7 +106,7 @@ def main() -> int:
     for path, entry in zip(single, winners):
         text = document_text(path)
         ok_name = entry.player.name in text
-        ok_rank = f"第 {entry.rank} 名" in text
+        ok_rank = (entry.award or entry.rank_cn) in text
         ok_empty = "{{" not in text and "}}" not in text
         check(ok_name and ok_rank and ok_empty,
               f"{path.name} 姓名/名次已填入且无残留占位符")
