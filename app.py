@@ -604,16 +604,15 @@ class AwardStudio(ctk.CTk):
 
     def _fit_columns(self) -> None:
         self._resize_job = None
-        columns = (
-            ("rank", 70), ("name", 110), ("no", 90), ("class", 120),
-            ("project", 220), ("score", 90), ("award", 90),
-        )
+        columns = getattr(self, "_table_columns", None)
+        if not columns:
+            return
         try:
-            base_total = sum(base for _key, base in columns)
+            base_total = sum(width for _key, _text, width, _anchor in columns)
             available = max(420, self.tree.winfo_width() - 20)
-            factor = min(self.text_scale, 1.4, available / base_total)
-            for key, base in columns:
-                self.tree.column(key, width=max(50, int(base * factor)))
+            factor = min(self.text_scale, 1.5, max(1.0, available / base_total))
+            for key, _text, width, _anchor in columns:
+                self.tree.column(key, width=max(48, int(width * factor)))
         except Exception:  # noqa: BLE001
             pass
 
@@ -905,34 +904,10 @@ class AwardStudio(ctk.CTk):
         ctk.CTkFrame(table_card, height=1, fg_color=LINE).grid(row=1, column=0, sticky="ew",
                                                               padx=18, pady=(12, 0))
 
-        holder = ctk.CTkFrame(table_card, fg_color="transparent")
+        self.table_holder = holder = ctk.CTkFrame(table_card, fg_color="transparent")
         holder.grid(row=2, column=0, sticky="nsew", padx=(14, 8), pady=(6, 12))
         holder.grid_columnconfigure(0, weight=1)
         holder.grid_rowconfigure(0, weight=1)
-
-        columns = ("rank", "name", "no", "class", "project", "score", "award")
-        self.tree = ttk.Treeview(holder, columns=columns, show="headings", height=6,
-                                 style="Award.Treeview", selectmode="browse")
-        headings = {
-            "rank": ("名次", 70, "center"),
-            "name": ("姓名", 110, "w"),
-            "no": ("编号", 90, "center"),
-            "class": ("班级", 120, "w"),
-            "project": ("作品名称", 220, "w"),
-            "score": ("总分", 90, "center"),
-            "award": ("奖项", 90, "center"),
-        }
-        for key, (text, width, anchor) in headings.items():
-            self.tree.heading(key, text=text, anchor=anchor)
-            self.tree.column(key, width=width, anchor=anchor,
-                             stretch=key in ("project", "class"))
-        self.tree.grid(row=0, column=0, sticky="nsew")
-
-        self.table_scrollbar = scrollbar = ctk.CTkScrollbar(
-            holder, command=self.tree.yview, fg_color="transparent",
-            button_color="#D4D9E4", button_hover_color="#B9C0D0", width=10)
-        scrollbar.grid(row=0, column=1, sticky="ns", padx=(2, 4))
-        self.tree.configure(yscrollcommand=scrollbar.set)
 
         # 没有数据时显示占位提示，而不是一张空表格
         self.empty_panel = ctk.CTkFrame(holder, fg_color="transparent")
@@ -948,12 +923,8 @@ class AwardStudio(ctk.CTk):
             font=self.font_small, text_color="#A7AFC0", justify="center")
         self.empty_hint.pack()
 
-        self.tree.tag_configure("first", background="#FFF8E6", foreground="#8A5A00")
-        self.tree.tag_configure("second", background="#F4F7FB", foreground="#3A4A5F")
-        self.tree.tag_configure("third", background="#FDF2EC", foreground="#8A4A1F")
-        self.tree.tag_configure("winner", background="#F7F5FF", foreground="#312E81")
-        self.tree.tag_configure("normal", background=CARD, foreground=MUTED)
-        self.tree.bind("<Double-1>", self._open_certificate)
+        self._table_columns: list[tuple] = []
+        self._build_table()
         self.bind("<Configure>", self._on_window_resize)
 
         # 日志
@@ -1000,6 +971,7 @@ class AwardStudio(ctk.CTk):
         self.players = players
         self.excel_title = report.title
         self.column_names = list(players[0].fields.keys()) if players else []
+        self._build_table()
         self.excel_btn.configure(text=short(path.name, 24), text_color=INK)
         self.excel_hint.configure(
             text=f"{report.sheet} · 表头第 {report.header_row} 行 · {report.describe()}",
@@ -1564,6 +1536,67 @@ class AwardStudio(ctk.CTk):
             if top:
                 self._log(f"最高分 {top.player.score:g} · {top.player.name}", "info")
 
+    def _column_has_values(self, key: str) -> bool:
+        for player in self.players:
+            if str(player.fields.get(key, "")).strip():
+                return True
+        return False
+
+    def _table_column_specs(self) -> list[tuple]:
+        """列由成绩表的实际字段决定：名次 + 原始各列 + 总分 + 奖项。"""
+        specs: list[tuple] = [("rank", "名次", 64, "center")]
+        if self.players:
+            for key in self.players[0].fields:
+                if key == "分数":
+                    continue
+                # 整列都没有值的（比如表里没有编号）就不显示
+                if key != "姓名" and not self._column_has_values(key):
+                    continue
+                width = {"姓名": 110, "编号": 90}.get(key, 130)
+                if key.startswith("评委"):
+                    width = 84
+                anchor = "center" if key in ("编号",) or key.startswith("评委") else "w"
+                specs.append((key, key, width, anchor))
+            specs.append(("score", "总分", 84, "center"))
+        else:
+            specs += [("name", "姓名", 110, "w"), ("no", "编号", 90, "center"),
+                      ("score", "总分", 84, "center")]
+        specs.append(("award", "奖项", 96, "center"))
+        return specs
+
+    def _build_table(self) -> None:
+        """按当前字段重建排名表（列会随成绩表变化）。"""
+        holder = self.table_holder
+        for child in list(holder.winfo_children()):
+            if child is self.empty_panel:
+                continue
+            child.destroy()
+
+        self._table_columns = self._table_column_specs()
+        keys = [spec[0] for spec in self._table_columns]
+        self.tree = ttk.Treeview(holder, columns=keys, show="headings", height=6,
+                                 style="Award.Treeview", selectmode="browse")
+        for key, text, width, anchor in self._table_columns:
+            self.tree.heading(key, text=text, anchor=anchor)
+            # 文本类列与奖项列承担富余宽度，数值列保持紧凑
+            stretch = anchor == "w" or key == "award"
+            self.tree.column(key, width=width, minwidth=48, anchor=anchor, stretch=stretch)
+        self.tree.grid(row=0, column=0, sticky="nsew")
+
+        self.table_scrollbar = ctk.CTkScrollbar(
+            holder, command=self.tree.yview, fg_color="transparent",
+            button_color="#D4D9E4", button_hover_color="#B9C0D0", width=10)
+        self.table_scrollbar.grid(row=0, column=1, sticky="ns", padx=(2, 4))
+        self.tree.configure(yscrollcommand=self.table_scrollbar.set)
+
+        self.tree.tag_configure("first", background="#FFF8E6", foreground="#8A5A00")
+        self.tree.tag_configure("second", background="#F4F7FB", foreground="#3A4A5F")
+        self.tree.tag_configure("third", background="#FDF2EC", foreground="#8A4A1F")
+        self.tree.tag_configure("winner", background="#F7F5FF", foreground="#312E81")
+        self.tree.tag_configure("normal", background=CARD, foreground=MUTED)
+        self.tree.bind("<Double-1>", self._open_certificate)
+        self._fit_columns()
+
     def _show_empty_state(self, empty: bool) -> None:
         """没有数据时用占位提示替代空表格，避免看起来像残留。"""
         try:
@@ -1585,17 +1618,15 @@ class AwardStudio(ctk.CTk):
         self._show_empty_state(False)
         self.tree.delete(*self.tree.get_children())
         for index, entry in enumerate(self.entries):
-            extras = entry.player.extras
+            fields = entry.player.fields
             award_text = (entry.award or "—") if entry.is_winner else "—"
-            values = (
-                entry.rank,
-                entry.player.name,
-                entry.player.no or "—",
-                extras.get("班级", "—"),
-                extras.get("作品名称", "—"),
-                f"{entry.player.score:g}",
-                award_text,
-            )
+            values = [entry.rank]
+            for key, _text, _width, _anchor in self._table_columns[1:-1]:
+                if key == "score":
+                    values.append(f"{entry.player.score:g}")
+                else:
+                    values.append(fields.get(key, "") or "—")
+            values.append(award_text)
             if entry.is_winner and index == 0:
                 tag = "first"
             elif entry.is_winner and index == 1:
