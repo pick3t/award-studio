@@ -30,6 +30,33 @@ jobs:
           path: dist/AwardStudio.exe
           if-no-files-found: error
 
+  windows-x86:
+    name: Windows x86 (32-bit)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up 32-bit Python
+        uses: actions/setup-python@v5
+        with:
+          # Python 3.13 起官方不再提供 32 位安装包，这里用 3.12
+          python-version: "3.12"
+          architecture: "x86"
+      - name: Install dependencies
+        run: pip install -r requirements.txt pyinstaller
+      - name: Build exe
+        run: >-
+          pyinstaller --noconfirm --clean --onefile --windowed
+          --name AwardStudio-x86
+          --icon assets/icon.ico
+          --manifest assets/app.manifest
+          --collect-all customtkinter
+          app.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AwardStudio-Windows-x86
+          path: dist/AwardStudio-x86.exe
+          if-no-files-found: error
+
   macos:
     name: macOS app
     runs-on: macos-latest
@@ -62,7 +89,7 @@ jobs:
   release:
     name: Attach to release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [windows, macos]
+    needs: [windows, windows-x86, macos]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -73,4 +100,5 @@ jobs:
         with:
           files: |
             AwardStudio-Windows/AwardStudio.exe
+            AwardStudio-Windows-x86/AwardStudio-x86.exe
             AwardStudio-macOS/AwardStudio-macOS.zip
