@@ -142,13 +142,17 @@ class AwardStudio(ctk.CTk):
 
         self._step_labels: list[tuple] = []
         self._award_rows: list[tuple] = []
+        self._scale_job = None
         self._drag_item = None
         self._drag_y = 0
         self._drag_moved = False
         self.awards = self._parse_awards(saved.get("awards"))
         self.award_mode = bool(saved.get("award_mode", True))
 
-        self._center(int(WINDOW_W * self.text_scale), int(WINDOW_H * self.text_scale))
+        # 窗口尺寸与字号解耦：始终按固定基准开窗，字号只影响内容
+        self._win_size = (WINDOW_W, WINDOW_H)
+        self._center(*self._win_size)
+        self.after(120, self._capture_window_size)
         self.minsize(1000, 620)
 
         self.font_h1 = self._mkfont("h1", 19, "bold")
@@ -156,7 +160,7 @@ class AwardStudio(ctk.CTk):
         self.font_step = self._mkfont("step", 12, "bold")
         self.font_body = self._mkfont("body", 12)
         self.font_small = self._mkfont("small", 11)
-        self.font_num = self._mkfont("num", 22, "bold", "Segoe UI")
+        self.font_num = self._mkfont("num", 22, "bold", "Segoe UI", cap=32)
 
         self._setup_style()
         self._build()
@@ -311,25 +315,63 @@ class AwardStudio(ctk.CTk):
                       command=self._open_output).grid(row=0, column=2)
 
     # -------------------------------------------------------------- 字号
-    def _mkfont(self, key: str, size: int, weight: str = "normal", family: str = FONT):
-        """按当前字号倍率创建字体，并登记以便统一调整。"""
-        font = ctk.CTkFont(family=family, size=max(8, round(size * self.text_scale)),
+    def _mkfont(self, key: str, size: int, weight: str = "normal", family: str = FONT,
+                cap: int | None = None):
+        """按当前字号倍率创建字体，并登记以便统一调整。
+
+        同一个 key 只创建一次，后续调用直接复用，否则新字体对象不在登记表里，
+        字号变化时那些控件不会跟着变。
+        """
+        if key in self._fonts:
+            return self._fonts[key][0]
+        font = ctk.CTkFont(family=family, size=max(8, self._font_px(size, cap)),
                            weight=weight)
-        self._fonts[key] = (font, size, weight, family)
+        self._fonts[key] = (font, size, weight, family, cap)
         return font
+
+    def _font_px(self, size: int, cap: int | None = None) -> int:
+        value = max(8, round(size * self.text_scale))
+        return min(value, cap) if cap else value
 
     def _px(self, value: float) -> int:
         """把设计尺寸换算成当前字号下的实际像素。"""
         return max(1, int(round(value * self.text_scale)))
 
     def _apply_text_scale(self) -> None:
-        for font, size, weight, family in self._fonts.values():
-            try:
-                font.configure(size=max(8, round(size * self.text_scale)))
-            except Exception:  # noqa: BLE001
-                pass
-        self._restyle_table()
-        self._resize_layout()
+        """分批应用字号：CTk 每改一个字体都要重绘所有相关控件，一次性做完会冻结窗口。"""
+        self._apply_token = getattr(self, "_apply_token", 0) + 1
+        token = self._apply_token
+        queue = list(self._fonts.values())
+
+        def table_step():
+            if token != self._apply_token:
+                return
+            self._restyle_table()
+            self.after(1, font_step)
+
+        def font_step():
+            if token != self._apply_token:
+                return
+            batch, rest = queue[:4], queue[4:]
+            queue[:] = rest
+            for font, size, weight, family, cap in batch:
+                try:
+                    font.configure(size=self._font_px(size, cap))
+                except Exception:  # noqa: BLE001
+                    pass
+            if queue:
+                self.after(1, font_step)
+            else:
+                self.after(1, layout_step)
+
+        def layout_step():
+            if token != self._apply_token:
+                return
+            self._resize_layout()
+            # 控件变大后 Tk 会把窗口一起撑大，这里锁回原来的尺寸
+            self.after(30, self._restore_window_size)
+
+        self.after(0, table_step)
 
     def _restyle_table(self) -> None:
         style = ttk.Style()
@@ -344,12 +386,14 @@ class AwardStudio(ctk.CTk):
         )
 
     def _resize_layout(self) -> None:
-        """字号变化后同步左栏宽度、控件高度与窗口尺寸。"""
+        """字号变化后同步控件尺寸。窗口本身保持不变，避免界面整体膨胀。"""
         px = self._px
+        # 左栏按比例变宽，但设上限，防止挤占右侧表格
+        panel_w = min(px(352), 560)
+        narrow = min(self.text_scale, 1.4)
         try:
-            self.left_panel.configure(width=px(352))
-            self.left_scroll.configure(width=px(322))
-            self.main_frame.grid_columnconfigure(0, minsize=px(352))
+            self.left_panel.configure(width=panel_w)
+            self.left_scroll.configure(width=max(200, panel_w - 30))
             self.header_frame.configure(height=px(72))
             self.badge.configure(width=px(44), height=px(44))
             for button, height in (
@@ -362,27 +406,100 @@ class AwardStudio(ctk.CTk):
             for title_label, title_h, sub_label, sub_h in self._step_labels:
                 title_label.configure(height=px(title_h))
                 sub_label.configure(height=px(sub_h))
-            for key, base in (
-                ("rank", 70), ("name", 110), ("no", 90), ("class", 120),
-                ("project", 220), ("score", 90), ("award", 90),
-            ):
-                self.tree.column(key, width=px(base))
+            self._fit_columns()
+            wrap = max(160, panel_w - 60)
+            self.excel_hint.configure(wraplength=wrap)
+            self.template_hint.configure(wraplength=wrap)
+            self._fit_award_rows()
         except Exception:  # noqa: BLE001 - 控件还没建好时跳过
             return
-        if self.award_switch.get():
-            self._render_awards()
+
+    def _capture_window_size(self) -> None:
+        """记住当前窗口尺寸（用户手动拉大过也会被记住）。"""
+        try:
+            self.update_idletasks()
+            width, height = self.winfo_width(), self.winfo_height()
+            if not getattr(sys, "frozen", False):
+                scale = self._get_window_scaling() or 1.0
+                width, height = int(width / scale), int(height / scale)
+            if width > 200 and height > 200:
+                self._win_size = (width, height)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _on_window_resize(self, event) -> None:
+        if event.widget is not self:
+            return
+        job = getattr(self, "_resize_job", None)
+        if job is not None:
+            try:
+                self.after_cancel(job)
+            except Exception:  # noqa: BLE001
+                pass
+        self._resize_job = self.after(220, self._fit_columns)
+
+    def _fit_columns(self) -> None:
+        self._resize_job = None
+        columns = (
+            ("rank", 70), ("name", 110), ("no", 90), ("class", 120),
+            ("project", 220), ("score", 90), ("award", 90),
+        )
+        try:
+            base_total = sum(base for _key, base in columns)
+            available = max(420, self.tree.winfo_width() - 20)
+            factor = min(self.text_scale, 1.4, available / base_total)
+            for key, base in columns:
+                self.tree.column(key, width=max(50, int(base * factor)))
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _restore_window_size(self) -> None:
+        size = getattr(self, "_win_size", None)
+        if not size:
+            return
+        try:
+            if getattr(sys, "frozen", False):
+                self.tk.call("wm", "geometry", self._w, f"{size[0]}x{size[1]}")
+            else:
+                self.geometry(f"{size[0]}x{size[1]}")
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _fit_award_rows(self) -> None:
+        """只调整已有奖项行的尺寸，不销毁重建（重建要 150ms 且会打断编辑）。"""
+        px = self._px
+        for item_row in self._award_rows:
+            if len(item_row) < 3:
+                continue
+            row, _item, widgets = item_row
+            handle, name_entry, count_entry, del_btn = widgets
+            handle.configure(width=px(20), height=px(30))
+            name_entry.configure(height=px(30))
+            count_entry.configure(width=px(46), height=px(30))
+            del_btn.configure(width=px(26), height=px(28))
 
     def _change_scale(self, delta: int) -> None:
         size = max(FONT_SIZE_MIN, min(FONT_SIZE_MAX, self.font_size + delta))
         if size == self.font_size:
             return
+        if self._scale_job is None:
+            self._capture_window_size()
         self.font_size = size
         self.text_scale = size / FONT_SIZE_DEFAULT
-        self._apply_text_scale()
         self.scale_label.configure(text=f"{size} pt")
+        # 连续点击时只渲染最后一次，避免每次都全量重排
+        if self._scale_job is not None:
+            try:
+                self.after_cancel(self._scale_job)
+            except Exception:  # noqa: BLE001
+                pass
+        self._scale_job = self.after(140, self._apply_scale_now)
+
+    def _apply_scale_now(self) -> None:
+        self._scale_job = None
+        self._apply_text_scale()
         self._save_settings()
-        self._center(int(WINDOW_W * self.text_scale), int(WINDOW_H * self.text_scale))
-        self._log(f"界面字号：{size} pt（可在右上角 A- / A+ 继续调整）", "muted")
+        self._log(f"界面字号：{self.font_size} pt", "muted")
 
     def _save_settings(self) -> None:
         data = prefs.load()
@@ -578,8 +695,9 @@ class AwardStudio(ctk.CTk):
         self.table_note = ctk.CTkLabel(head, text="同分并列名次，前三名高亮",
                                        font=self.font_small, text_color=MUTED, anchor="w")
         self.table_note.grid(row=1, column=0, sticky="w")
-        self.merge_hint = ctk.CTkLabel(head, text="", font=self.font_small, text_color=PRIMARY,
-                                       anchor="e")
+        self.merge_hint = ctk.CTkLabel(head, text="",
+                                       font=self._mkfont("merge_hint", 11, cap=16),
+                                       text_color=PRIMARY, anchor="e")
         self.merge_hint.grid(row=0, column=1, rowspan=2, sticky="e")
 
         ctk.CTkFrame(table_card, height=1, fg_color=LINE).grid(row=1, column=0, sticky="ew",
@@ -620,6 +738,7 @@ class AwardStudio(ctk.CTk):
         self.tree.tag_configure("winner", background="#F7F5FF", foreground="#312E81")
         self.tree.tag_configure("normal", background=CARD, foreground=MUTED)
         self.tree.bind("<Double-1>", self._open_certificate)
+        self.bind("<Configure>", self._on_window_resize)
 
         # 日志
         self.log_card = log_card = ctk.CTkFrame(right, corner_radius=16, fg_color=CARD,
@@ -882,6 +1001,7 @@ class AwardStudio(ctk.CTk):
         for child in self.awards_box.winfo_children():
             child.destroy()
         self._award_rows: list[tuple] = []
+        self._scale_job = None
 
         for item in self.awards:
             row = ctk.CTkFrame(self.awards_box, fg_color="transparent")
@@ -908,11 +1028,12 @@ class AwardStudio(ctk.CTk):
                 font=self.font_small, justify="center",
             )
             count_entry.pack(side="left", padx=(6, 4))
-            ctk.CTkButton(
+            del_btn_widget = ctk.CTkButton(
                 row, text="×", width=self._px(26), height=self._px(28), corner_radius=8,
                 fg_color="transparent", hover_color="#FBE9E9", text_color="#B91C1C",
                 font=self.font_small, command=lambda it=item: self._remove_award(it),
-            ).pack(side="left")
+            )
+            del_btn_widget.pack(side="left")
 
             name_var.trace_add(
                 "write",
@@ -922,7 +1043,7 @@ class AwardStudio(ctk.CTk):
                 "write",
                 lambda *_a, it=item, var=count_var: self._update_award(it, "count", var.get()),
             )
-            self._award_rows.append((row, item))
+            self._award_rows.append((row, item, (handle, entry, count_entry, del_btn_widget)))
 
     # ---------------------------------------------------------- 拖动排序
     def _begin_drag(self, event, item: dict) -> None:
@@ -931,7 +1052,7 @@ class AwardStudio(ctk.CTk):
         self._drag_item = item
         self._drag_y = event.y_root
         self._drag_moved = False
-        for row, target in self._award_rows:
+        for row, target, _widgets in self._award_rows:
             if target is item:
                 row.configure(fg_color="#EEF0FF")
         self.bind_all("<B1-Motion>", self._on_drag_move)
@@ -956,7 +1077,7 @@ class AwardStudio(ctk.CTk):
             self.unbind_all("<ButtonRelease-1>")
         except Exception:  # noqa: BLE001
             pass
-        for row, _target in self._award_rows:
+        for row, _target, _widgets in self._award_rows:
             try:
                 row.configure(fg_color="transparent")
             except Exception:  # noqa: BLE001
@@ -986,16 +1107,18 @@ class AwardStudio(ctk.CTk):
 
     def _apply_award_order(self) -> None:
         """只调整行控件顺序，不重建，避免拖动时输入框失焦。"""
-        frames = {id(item): frame for frame, item in self._award_rows}
-        for frame, _item in self._award_rows:
+        frames = {id(item): (frame, widgets)
+                  for frame, item, widgets in self._award_rows}
+        for frame, _item, _widgets in self._award_rows:
             frame.pack_forget()
         ordered = []
         for item in self.awards:
-            frame = frames.get(id(item))
-            if frame is None:
+            entry = frames.get(id(item))
+            if entry is None:
                 continue
+            frame, widgets = entry
             frame.pack(fill="x", pady=2)
-            ordered.append((frame, item))
+            ordered.append((frame, item, widgets))
         if ordered:
             self._award_rows = ordered
 
