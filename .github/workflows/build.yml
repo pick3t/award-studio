@@ -22,6 +22,8 @@ jobs:
           --name AwardStudio
           --icon assets/icon.ico
           --manifest assets/app.manifest
+          --add-data "assets/icon.png;assets"
+          --add-data "assets/icon.ico;assets"
           --collect-all customtkinter
           app.py
       - uses: actions/upload-artifact@v4
@@ -49,6 +51,8 @@ jobs:
           --name AwardStudio-x86
           --icon assets/icon.ico
           --manifest assets/app.manifest
+          --add-data "assets/icon.png;assets"
+          --add-data "assets/icon.ico;assets"
           --collect-all customtkinter
           app.py
       - uses: actions/upload-artifact@v4
@@ -74,6 +78,8 @@ jobs:
           pyinstaller --noconfirm --clean --windowed
           --name AwardStudio
           --osx-bundle-identifier com.pick3t.awardstudio
+          --add-data "assets/icon.png:assets"
+          --add-data "assets/icon.ico:assets"
           --collect-all customtkinter
           app.py
       - name: Package

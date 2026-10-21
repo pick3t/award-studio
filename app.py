@@ -34,7 +34,7 @@ DATA_DIR = Path(sys.executable).parent if getattr(sys, "frozen", False) else BAS
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
-APP_VERSION = "1.1.1"
+APP_VERSION = "1.1.2"
 
 from core.certificate import (  # noqa: E402
     CertificateContext,
@@ -317,6 +317,11 @@ class AwardStudio(ctk.CTk):
             ("window_scaling", lambda: self._get_window_scaling()),
             ("widget_scaling", lambda: self._get_widget_scaling()),
             ("ctk_version", lambda: ctk.__version__),
+            ("base_dir", lambda: str(BASE_DIR)),
+            ("icon_png", lambda: (BASE_DIR / "assets" / "icon.png").exists()),
+            ("icon_ico", lambda: (BASE_DIR / "assets" / "icon.ico").exists()),
+            ("logo", lambda: type(self.badge).__name__),
+            ("win_icon", lambda: bool(getattr(self, "_icon_photo", None))),
         ]
         for name, fn in probes:
             try:
