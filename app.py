@@ -545,7 +545,7 @@ class AwardStudio(ctk.CTk):
             self.excel_hint.configure(wraplength=wrap)
             self.template_hint.configure(wraplength=wrap)
             self._fit_award_rows()
-            if self.field_rules:
+            if self.field_rules and self.template_keys:
                 self._render_mappings()
         except Exception:  # noqa: BLE001 - 控件还没建好时跳过
             return
@@ -749,21 +749,21 @@ class AwardStudio(ctk.CTk):
 
         # ③ 字段映射
         self._step_title(wrap, "③", "字段映射", "指定占位符取什么值")
-        self.mapping_box = ctk.CTkFrame(wrap, fg_color="transparent")
-        self.mapping_box.pack(fill="x")
+        # 固定容器：内部控件按需显示，容器本身始终占位以保持顺序（内容为空时不占高度）
+        self.mapping_section = ctk.CTkFrame(wrap, fg_color="transparent")
+        self.mapping_section.pack(fill="x")
+        self.mapping_box = ctk.CTkFrame(self.mapping_section, fg_color="transparent")
         self.mapping_hint = ctk.CTkLabel(
-            wrap, text="选择奖状模板后，这里会列出模板里的占位符",
+            self.mapping_section, text="选择奖状模板后，这里会列出模板里的占位符",
             font=self.font_small, text_color=MUTED, anchor="w",
             justify="left", wraplength=286,
         )
-        self.mapping_hint.pack(fill="x", pady=(4, 0))
         self.mapping_toggle = ctk.CTkButton(
-            wrap, text="收起映射", height=22, fg_color="transparent",
+            self.mapping_section, text="收起映射", height=22, fg_color="transparent",
             hover_color="#F1F4FA", text_color=MUTED, font=self.font_small,
             anchor="w", command=self._toggle_mappings,
         )
-        self.mapping_toggle.pack(fill="x", pady=(2, 0))
-        self.mapping_open = True
+        self.mapping_open = False
 
         # ④ 奖项
         self._step_title(wrap, "④", "奖项设置", "自定义名称与人数，按住 ≡ 可拖动排序")
@@ -998,9 +998,10 @@ class AwardStudio(ctk.CTk):
             self.output_dir = path.parent / "output" / "奖状"
         self._update_output_hint()
 
-        self.max_winners = max(1, min(len(players), 50))
-        self.slider.configure(to=max(1, min(20, self.max_winners)),
-                              number_of_steps=max(1, min(20, self.max_winners) - 1))
+        # 名额上限跟着人数走，表格里有多少人就能选多少
+        total = max(1, len(players))
+        self.max_winners = total
+        self.slider.configure(to=total, number_of_steps=max(1, total - 1))
         self.winners = min(self.winners, self.max_winners)
         self.slider.set(self.winners)
         self.qty_label.configure(text=str(self.winners))
@@ -1035,6 +1036,7 @@ class AwardStudio(ctk.CTk):
                 text_color=WARNING,
             )
             self._log("模板里没有找到 {{ }} 占位符，生成时会失败", "warn")
+        self.mapping_open = True
         self._refresh_field_rules()
         self._sync_buttons()
 
@@ -1157,15 +1159,29 @@ class AwardStudio(ctk.CTk):
 
     # -------------------------------------------------------------- 字段映射
     def _toggle_mappings(self) -> None:
-        self.mapping_open = not getattr(self, "mapping_open", True)
+        self.mapping_open = not getattr(self, "mapping_open", False)
+        self._sync_mapping_visibility()
+
+    def _sync_mapping_visibility(self) -> None:
+        """没有模板或没有占位符时整块隐藏，避免留白。"""
+        has_fields = bool(self.field_rules) and bool(self.template_keys)
+        if not has_fields:
+            self.mapping_box.pack_forget()
+            self.mapping_hint.pack_forget()
+            self.mapping_toggle.pack_forget()
+            return
+        self.mapping_hint.pack_forget()
+        # 先按钮后列表，保证容器内顺序稳定
+        if not self.mapping_toggle.winfo_ismapped():
+            self.mapping_toggle.pack(fill="x", pady=(2, 0))
         if self.mapping_open:
-            self.mapping_box.pack(fill="x", before=self.mapping_toggle)
+            if not self.mapping_box.winfo_ismapped():
+                self.mapping_box.pack(fill="x", before=self.mapping_toggle)
             self.mapping_toggle.configure(text="收起映射")
         else:
             self.mapping_box.pack_forget()
-            count = len(self.field_rules)
             self.mapping_toggle.configure(
-                text=f"展开映射（{count} 个字段）" if count else "展开映射")
+                text=f"展开映射（{len(self.field_rules)} 个字段）")
 
     def _column_names(self) -> list[str]:
         if self.players:
@@ -1190,11 +1206,9 @@ class AwardStudio(ctk.CTk):
     def _render_mappings(self) -> None:
         for child in self.mapping_box.winfo_children():
             child.destroy()
-        if not self.field_rules:
-            self.mapping_hint.configure(
-                text="选择奖状模板后，这里会列出模板里的占位符")
+        if not self.field_rules or not self.template_keys:
+            self._sync_mapping_visibility()
             return
-        self.mapping_hint.configure(text="")
         for rule in self.field_rules:
             row = ctk.CTkFrame(self.mapping_box, fg_color="transparent")
             row.pack(fill="x", pady=1)
@@ -1215,6 +1229,7 @@ class AwardStudio(ctk.CTk):
             holder = ctk.CTkFrame(row, fg_color="transparent")
             holder.pack(side="left", fill="x", expand=True)
             self._build_mapping_value(holder, rule)
+        self._sync_mapping_visibility()
 
     def _build_mapping_value(self, holder, rule) -> None:
         height = self._px(26)
