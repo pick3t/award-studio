@@ -276,6 +276,7 @@ class AwardStudio(ctk.CTk):
         self.template_keys: list[str] = []
         self.column_names: list[str] = []
         self.score_columns: list[str] = []
+        self.score_column_names: list[str] = []
 
         self.awards = self._parse_awards(saved.get("awards"))
         self.award_mode = bool(saved.get("award_mode", True))
@@ -906,7 +907,7 @@ class AwardStudio(ctk.CTk):
         head.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(head, text="排名总览", font=self._mkfont("card_title", 14, "bold"),
                      text_color=INK, anchor="w").grid(row=0, column=0, sticky="w")
-        self.table_note = ctk.CTkLabel(head, text="同分并列名次 · 点击表头数字列可切换排名依据",
+        self.table_note = ctk.CTkLabel(head, text="点表头数字列选择排名依据",
                                        font=self.font_small, text_color=MUTED, anchor="w")
         self.table_note.grid(row=1, column=0, sticky="w")
         self.merge_hint = ctk.CTkLabel(head, text="",
@@ -984,7 +985,11 @@ class AwardStudio(ctk.CTk):
         self.players = players
         self.excel_title = report.title
         self.column_names = list(players[0].fields.keys()) if players else []
-        self.score_columns = ["分数"]
+        score_idx = report.columns.get("score", [])
+        self.score_column_names = [report.headers[i] for i in score_idx
+                                   if i < len(report.headers)] if score_idx else []
+        # 不预置任何评判列，全部交给用户点表头勾选
+        self.score_columns = []
         self._apply_score_columns()
         self._build_table()
         self.excel_btn.configure(text=short(path.name, 24), text_color=INK)
@@ -1546,6 +1551,7 @@ class AwardStudio(ctk.CTk):
         )
         self._refresh_table()
         self._refresh_stats()
+        self._update_table_note()
         self._update_award_warning()
         if not keep_log:
             top = self.entries[0] if self.entries else None
@@ -1646,13 +1652,18 @@ class AwardStudio(ctk.CTk):
             multi = len(self.score_columns) > 1
             for key in self.players[0].fields:
                 if key == "分数":
-                    if multi:
+                    selected = self.score_columns
+                    if len(selected) > 1:
                         specs.append(("total", "合计", 112, "center"))
                         specs.append(("avg", "平均", 104, "center"))
-                    else:
-                        # 单列勾选非综合分时，这一列其实是排名分
-                        single = len(self.score_columns) == 1 and "分数" not in self.score_columns
-                        specs.append(("分数", "排名分" if single else "总分", 112, "center"))
+                    elif len(selected) == 1:
+                        label = "总分" if "分数" in selected else "排名分"
+                        specs.append(("分数", label, 112, "center"))
+                    elif len(self.score_column_names) <= 1:
+                        # 表里本来就只有一列分数，原样展示给用户勾选
+                        original = self.score_column_names[0] if self.score_column_names else "分数"
+                        specs.append(("分数", original, 112, "center"))
+                    # 多评委合并出来的综合分不主动展示，用户勾选后才出现
                     continue
                 # 整列都没有值的（比如表里没有编号）就不显示
                 if key != "姓名" and not self._column_has_values(key):
@@ -1760,6 +1771,18 @@ class AwardStudio(ctk.CTk):
             else:
                 tag = "normal"
             self.tree.insert("", "end", values=values, tags=(tag,))
+
+    def _update_table_note(self) -> None:
+        note = getattr(self, "table_note", None)
+        if note is None:
+            return
+        if not self.players:
+            note.configure(text="同分并列名次 · 前三名高亮")
+        elif not self.score_columns:
+            note.configure(text="未选评判列，暂按原综合分排 · 点表头勾选")
+        else:
+            names = "、".join(self.score_columns)
+            note.configure(text=f"排名依据：{names}")
 
     def _update_award_warning(self) -> None:
         """同分并列导致实际发奖人数与设置不一致时提醒用户改人数。"""
