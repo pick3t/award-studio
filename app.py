@@ -141,6 +141,10 @@ class AwardStudio(ctk.CTk):
         self._fonts: dict[str, tuple] = {}
 
         self._step_labels: list[tuple] = []
+        self._award_rows: list[tuple] = []
+        self._drag_item = None
+        self._drag_y = 0
+        self._drag_moved = False
         self.awards = self._parse_awards(saved.get("awards"))
         self.award_mode = bool(saved.get("award_mode", True))
 
@@ -446,7 +450,7 @@ class AwardStudio(ctk.CTk):
         self.template_hint.pack(fill="x")
 
         # ③ 奖项
-        self._step_title(wrap, "③", "奖项设置", "自定义奖项名称与人数")
+        self._step_title(wrap, "③", "奖项设置", "自定义名称与人数，按住 ≡ 可拖动排序")
 
         self.award_switch = ctk.CTkSwitch(
             wrap, text="设置奖项等级", font=self.font_small,
@@ -777,11 +781,21 @@ class AwardStudio(ctk.CTk):
                                    else MUTED)
 
     def _render_awards(self) -> None:
+        self._drag_item = None
         for child in self.awards_box.winfo_children():
             child.destroy()
-        for index, item in enumerate(self.awards):
+        self._award_rows: list[tuple] = []
+
+        for item in self.awards:
             row = ctk.CTkFrame(self.awards_box, fg_color="transparent")
             row.pack(fill="x", pady=2)
+
+            handle = ctk.CTkLabel(
+                row, text="≡", width=self._px(20), height=self._px(30),
+                font=self.font_body, text_color="#A9B0C2", cursor="fleur",
+            )
+            handle.pack(side="left")
+            handle.bind("<ButtonPress-1>", lambda event, it=item: self._begin_drag(event, it))
 
             name_var = ctk.StringVar(value=item["name"])
             count_var = ctk.StringVar(value=str(item["count"]))
@@ -790,7 +804,7 @@ class AwardStudio(ctk.CTk):
                 fg_color="#F8FAFD", border_width=1, border_color=LINE,
                 font=self.font_small, placeholder_text="奖项名称",
             )
-            entry.pack(side="left", fill="x", expand=True)
+            entry.pack(side="left", fill="x", expand=True, padx=(4, 0))
             count_entry = ctk.CTkEntry(
                 row, textvariable=count_var, width=self._px(46), height=self._px(30),
                 corner_radius=8, fg_color="#F8FAFD", border_width=1, border_color=LINE,
@@ -800,29 +814,104 @@ class AwardStudio(ctk.CTk):
             ctk.CTkButton(
                 row, text="×", width=self._px(26), height=self._px(28), corner_radius=8,
                 fg_color="transparent", hover_color="#FBE9E9", text_color="#B91C1C",
-                font=self.font_small, command=lambda i=index: self._remove_award(i),
+                font=self.font_small, command=lambda it=item: self._remove_award(it),
             ).pack(side="left")
 
             name_var.trace_add(
                 "write",
-                lambda *_a, i=index, var=name_var: self._update_award(i, "name", var.get()),
+                lambda *_a, it=item, var=name_var: self._update_award(it, "name", var.get()),
             )
             count_var.trace_add(
                 "write",
-                lambda *_a, i=index, var=count_var: self._update_award(i, "count", var.get()),
+                lambda *_a, it=item, var=count_var: self._update_award(it, "count", var.get()),
             )
+            self._award_rows.append((row, item))
 
-    def _update_award(self, index: int, field: str, value: str) -> None:
-        if index >= len(self.awards):
+    # ---------------------------------------------------------- 拖动排序
+    def _begin_drag(self, event, item: dict) -> None:
+        if len(self.awards) < 2:
+            return
+        self._drag_item = item
+        self._drag_y = event.y_root
+        self._drag_moved = False
+        for row, target in self._award_rows:
+            if target is item:
+                row.configure(fg_color="#EEF0FF")
+        self.bind_all("<B1-Motion>", self._on_drag_move)
+        self.bind_all("<ButtonRelease-1>", self._end_drag)
+
+    def _row_height(self) -> int:
+        if self._award_rows:
+            return max(self._px(34), self._award_rows[0][0].winfo_height() + 4)
+        return self._px(34)
+
+    def _on_drag_move(self, event) -> None:
+        if self._drag_item is None:
+            return
+        steps = int((event.y_root - self._drag_y) / self._row_height())
+        if steps and self._shift_award(self._drag_item, steps):
+            self._drag_y += steps * self._row_height()
+            self._drag_moved = True
+
+    def _end_drag(self, event=None) -> None:
+        try:
+            self.unbind_all("<B1-Motion>")
+            self.unbind_all("<ButtonRelease-1>")
+        except Exception:  # noqa: BLE001
+            pass
+        for row, _target in self._award_rows:
+            try:
+                row.configure(fg_color="transparent")
+            except Exception:  # noqa: BLE001
+                pass
+        moved = getattr(self, "_drag_moved", False)
+        self._drag_item = None
+        if moved:
+            self._save_settings()
+            if self.players:
+                self._recalculate(keep_log=True)
+            self._log("奖项顺序已更新：" + " → ".join(it["name"] for it in self.awards), "muted")
+
+    def _shift_award(self, item: dict, steps: int) -> bool:
+        """把某个奖项上移/下移若干位。"""
+        index = next((i for i, it in enumerate(self.awards) if it is item), None)
+        if index is None:
+            return False
+        target = max(0, min(len(self.awards) - 1, index + steps))
+        if target == index:
+            return False
+        self.awards.insert(target, self.awards.pop(index))
+        self._apply_award_order()
+        self._update_award_total()
+        if self.players:
+            self._recalculate(keep_log=True)
+        return True
+
+    def _apply_award_order(self) -> None:
+        """只调整行控件顺序，不重建，避免拖动时输入框失焦。"""
+        frames = {id(item): frame for frame, item in self._award_rows}
+        for frame, _item in self._award_rows:
+            frame.pack_forget()
+        ordered = []
+        for item in self.awards:
+            frame = frames.get(id(item))
+            if frame is None:
+                continue
+            frame.pack(fill="x", pady=2)
+            ordered.append((frame, item))
+        if ordered:
+            self._award_rows = ordered
+
+    def _update_award(self, item: dict, field: str, value: str) -> None:
+        if not any(it is item for it in self.awards):
             return
         if field == "name":
-            self.awards[index]["name"] = value
+            item["name"] = value
         else:
             try:
-                number = int(value)
+                item["count"] = max(0, int(value))
             except ValueError:
-                number = 0
-            self.awards[index]["count"] = max(0, number)
+                item["count"] = 0
         self._update_award_total()
         self._save_settings()
         if self.players:
@@ -837,9 +926,8 @@ class AwardStudio(ctk.CTk):
         if self.players:
             self._recalculate(keep_log=True)
 
-    def _remove_award(self, index: int) -> None:
-        if 0 <= index < len(self.awards):
-            self.awards.pop(index)
+    def _remove_award(self, item: dict) -> None:
+        self.awards = [it for it in self.awards if it is not item]
         self._sync_award_ui()
         self._save_settings()
         if self.players:
