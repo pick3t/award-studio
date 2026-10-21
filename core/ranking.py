@@ -98,14 +98,41 @@ def rank_players(
             rank = index
         previous_score, previous_rank = player.score, rank
         entries.append(
-            RankedEntry(
-                rank=rank,
-                player=player,
-                award=slots[index - 1] if index <= len(slots) else "",
-                is_winner=index <= quota,
-            )
+            RankedEntry(rank=rank, player=player, award="", is_winner=False)
         )
+
+    # 同分必须同奖：按分数分组整体分配，避免同分的人被拆到不同奖项
+    index = 0
+    while index < len(ordered):
+        end = index + 1
+        while end < len(ordered) and abs(ordered[end].score - ordered[index].score) < 1e-9:
+            end += 1
+        in_quota = index < quota
+        award = slots[index] if in_quota and index < len(slots) else ""
+        for position in range(index, end):
+            entries[position].award = award
+            entries[position].is_winner = in_quota
+        index = end
     return entries
+
+
+def award_conflicts(entries: list[RankedEntry], award_tiers) -> list[dict]:
+    """实际发放人数与配置不一致的奖项（多因同分并列导致）。"""
+    counts: dict[str, int] = {}
+    for entry in entries:
+        if entry.is_winner and entry.award:
+            counts[entry.award] = counts.get(entry.award, 0) + 1
+
+    conflicts: list[dict] = []
+    for item in award_tiers or []:
+        try:
+            name, configured = str(item[0]), int(item[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        actual = counts.get(name, 0)
+        if actual != configured:
+            conflicts.append({"name": name, "configured": configured, "actual": actual})
+    return conflicts
 
 
 def winners_of(entries: list[RankedEntry], winners: int | None = None) -> list[RankedEntry]:

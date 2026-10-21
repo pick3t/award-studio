@@ -45,7 +45,7 @@ from core.certificate import (  # noqa: E402
 from core import fields as field_rules  # noqa: E402
 from core import settings as prefs  # noqa: E402
 from core.excel_reader import ExcelParseError, load_players  # noqa: E402
-from core.ranking import rank_players, winners_of  # noqa: E402
+from core.ranking import award_conflicts, rank_players, winners_of  # noqa: E402
 
 # ------------------------------------------------------------------ 设计令牌
 BG = "#F3F5FA"
@@ -795,6 +795,10 @@ class AwardStudio(ctk.CTk):
             self.awards_panel, text="", font=self.font_small, text_color=MUTED, anchor="w",
         )
         self.award_total.pack(fill="x", pady=(4, 0))
+        self.award_warn = ctk.CTkLabel(
+            self.awards_panel, text="", font=self.font_small, text_color=WARNING,
+            anchor="w", justify="left", wraplength=286,
+        )
 
         # B) 仅排名次（关闭奖项时显示）
         self.qty_panel = ctk.CTkFrame(self.award_area, fg_color="transparent")
@@ -1531,6 +1535,7 @@ class AwardStudio(ctk.CTk):
         )
         self._refresh_table()
         self._refresh_stats()
+        self._update_award_warning()
         if not keep_log:
             top = self.entries[0] if self.entries else None
             if top:
@@ -1638,6 +1643,41 @@ class AwardStudio(ctk.CTk):
             else:
                 tag = "normal"
             self.tree.insert("", "end", values=values, tags=(tag,))
+
+    def _update_award_warning(self) -> None:
+        """同分并列导致实际发奖人数与设置不一致时提醒用户改人数。"""
+        warn = getattr(self, "award_warn", None)
+        if warn is None:
+            return
+        if not self.award_switch.get() or not self.entries:
+            warn.pack_forget()
+            warn.configure(text="")
+            self._last_conflict = ""
+            return
+        tiers = [(item["name"], item["count"]) for item in self.awards]
+        conflicts = award_conflicts(self.entries, tiers)
+        if not conflicts:
+            warn.pack_forget()
+            warn.configure(text="")
+            self._last_conflict = ""
+            return
+
+        parts = []
+        for item in conflicts:
+            name, configured, actual = item["name"], item["configured"], item["actual"]
+            if actual > configured:
+                parts.append(f"「{name}」设了 {configured} 名，但有 {actual} 人同分并列")
+            else:
+                parts.append(f"「{name}」设了 {configured} 名，实际只能发 {actual} 名")
+        warn.configure(text="；".join(parts) + "。建议按实际人数调整上面的奖项设置。",
+                       wraplength=self._px(252))
+        if not warn.winfo_ismapped():
+            warn.pack(fill="x", pady=(6, 0))
+
+        signature = "|".join(f"{c['name']}:{c['actual']}" for c in conflicts)
+        if signature != getattr(self, "_last_conflict", ""):
+            self._last_conflict = signature
+            self._log("；".join(parts) + "，建议调整奖项人数", "warn")
 
     def _refresh_stats(self) -> None:
         if not self.players:
