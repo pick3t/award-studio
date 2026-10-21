@@ -41,6 +41,7 @@ from core.certificate import (  # noqa: E402
     inspect_template,
     merge_documents,
 )
+from core import settings as prefs  # noqa: E402
 from core.excel_reader import ExcelParseError, load_players  # noqa: E402
 from core.ranking import rank_players, winners_of  # noqa: E402
 
@@ -59,6 +60,10 @@ DANGER = "#DC2626"
 GOLD = "#B8860B"
 
 FONT = "Microsoft YaHei UI"
+
+# 字号档位：界面里所有文字都按这里的倍率缩放
+FONT_SCALES = (0.85, 1.0, 1.12, 1.25)
+FONT_SCALE_LABELS = ("小", "标准", "大", "特大")
 
 
 def short(text: str, limit: int = 20) -> str:
@@ -112,12 +117,21 @@ class AwardStudio(ctk.CTk):
         self.generated: list[Path] = []
         self.busy = False
 
-        self.font_h1 = ctk.CTkFont(FONT, 19, "bold")
-        self.font_sub = ctk.CTkFont(FONT, 11)
-        self.font_step = ctk.CTkFont(FONT, 12, "bold")
-        self.font_body = ctk.CTkFont(FONT, 12)
-        self.font_small = ctk.CTkFont(FONT, 11)
-        self.font_num = ctk.CTkFont("Segoe UI", 22, "bold")
+        saved = prefs.load()
+        try:
+            index = int(saved.get("text_scale_index", 1))
+        except (TypeError, ValueError):
+            index = 1
+        self.text_scale_index = max(0, min(len(FONT_SCALES) - 1, index))
+        self.text_scale = FONT_SCALES[self.text_scale_index]
+        self._fonts: dict[str, tuple] = {}
+
+        self.font_h1 = self._mkfont("h1", 19, "bold")
+        self.font_sub = self._mkfont("sub", 11)
+        self.font_step = self._mkfont("step", 12, "bold")
+        self.font_body = self._mkfont("body", 12)
+        self.font_small = self._mkfont("small", 11)
+        self.font_num = self._mkfont("num", 22, "bold", "Segoe UI")
 
         self._setup_style()
         self._build()
@@ -173,13 +187,11 @@ class AwardStudio(ctk.CTk):
             rowheight=40,
             borderwidth=0,
             relief="flat",
-            font=(FONT, 10),
         )
         style.configure(
             "Award.Treeview.Heading",
             background="#F8FAFD",
             foreground=MUTED,
-            font=(FONT, 9, "bold"),
             relief="flat",
             borderwidth=0,
             padding=(10, 10),
@@ -194,6 +206,7 @@ class AwardStudio(ctk.CTk):
             style.layout("Award.Treeview", [("Award.Treeview.treearea", {"sticky": "nswe"})])
         except Exception:  # noqa: BLE001
             pass
+        self._restyle_table()
 
     def _build(self) -> None:
         self.grid_columnconfigure(0, weight=1)
@@ -217,7 +230,7 @@ class AwardStudio(ctk.CTk):
         badge = ctk.CTkFrame(header, width=44, height=44, corner_radius=13, fg_color=PRIMARY)
         badge.grid(row=0, column=0, rowspan=2, sticky="w")
         badge.grid_propagate(False)
-        ctk.CTkLabel(badge, text="A", font=ctk.CTkFont("Segoe UI", 22, "bold"),
+        ctk.CTkLabel(badge, text="A", font=self._mkfont("badge", 22, "bold", "Segoe UI"),
                      text_color="#FFFFFF").place(relx=0.5, rely=0.5, anchor="center")
 
         ctk.CTkLabel(header, text="Award Studio", font=self.font_h1, text_color=INK,
@@ -227,14 +240,76 @@ class AwardStudio(ctk.CTk):
 
         actions = ctk.CTkFrame(header, fg_color="transparent")
         actions.grid(row=0, column=2, rowspan=2, sticky="e")
+
+        # 字号调节
+        font_box = ctk.CTkFrame(actions, fg_color="#F8FAFD", corner_radius=9,
+                                border_width=1, border_color=LINE)
+        font_box.grid(row=0, column=0, padx=(0, 10))
+        ctk.CTkButton(font_box, text="A-", width=30, height=30, corner_radius=7,
+                      fg_color="transparent", hover_color="#E9EEF7", text_color=INK,
+                      font=self.font_small, command=lambda: self._change_scale(-1)
+                      ).pack(side="left", padx=(3, 0), pady=2)
+        self.scale_label = ctk.CTkLabel(font_box, text=f"{int(self.text_scale * 100)}%",
+                                        font=self.font_small, text_color=MUTED, width=42)
+        self.scale_label.pack(side="left")
+        ctk.CTkButton(font_box, text="A+", width=30, height=30, corner_radius=7,
+                      fg_color="transparent", hover_color="#E9EEF7", text_color=INK,
+                      font=self.font_small, command=lambda: self._change_scale(1)
+                      ).pack(side="left", padx=(0, 3), pady=2)
+
         ctk.CTkButton(actions, text="使用说明", width=92, height=34, corner_radius=9,
                       fg_color=CARD, hover_color="#F1F4FA", text_color=INK,
                       border_width=1, border_color=LINE, font=self.font_small,
-                      command=self._show_help).grid(row=0, column=0, padx=(0, 8))
+                      command=self._show_help).grid(row=0, column=1, padx=(0, 8))
         ctk.CTkButton(actions, text="打开输出目录", width=112, height=34, corner_radius=9,
                       fg_color=CARD, hover_color="#F1F4FA", text_color=INK,
                       border_width=1, border_color=LINE, font=self.font_small,
-                      command=self._open_output).grid(row=0, column=1)
+                      command=self._open_output).grid(row=0, column=2)
+
+    # -------------------------------------------------------------- 字号
+    def _mkfont(self, key: str, size: int, weight: str = "normal", family: str = FONT):
+        """按当前字号倍率创建字体，并登记以便统一调整。"""
+        font = ctk.CTkFont(family=family, size=max(8, round(size * self.text_scale)),
+                           weight=weight)
+        self._fonts[key] = (font, size, weight, family)
+        return font
+
+    def _apply_text_scale(self) -> None:
+        for font, size, weight, family in self._fonts.values():
+            try:
+                font.configure(size=max(8, round(size * self.text_scale)))
+            except Exception:  # noqa: BLE001
+                pass
+        self._restyle_table()
+
+    def _restyle_table(self) -> None:
+        style = ttk.Style()
+        style.configure(
+            "Award.Treeview",
+            font=(FONT, max(8, round(10 * self.text_scale))),
+            rowheight=round(40 * self.text_scale),
+        )
+        style.configure(
+            "Award.Treeview.Heading",
+            font=(FONT, max(8, round(9 * self.text_scale)), "bold"),
+        )
+
+    def _change_scale(self, delta: int) -> None:
+        index = max(0, min(len(FONT_SCALES) - 1, self.text_scale_index + delta))
+        if index == self.text_scale_index:
+            return
+        self.text_scale_index = index
+        self.text_scale = FONT_SCALES[index]
+        self._apply_text_scale()
+        self.scale_label.configure(text=f"{int(self.text_scale * 100)}%")
+        self._save_settings()
+        self._log(f"字号已切换为「{FONT_SCALE_LABELS[index]}」"
+                  f"（{int(self.text_scale * 100)}%），可在右上角 A- / A+ 继续调整", "muted")
+
+    def _save_settings(self) -> None:
+        data = prefs.load()
+        data["text_scale_index"] = self.text_scale_index
+        prefs.save(data)
 
     def _build_left(self, parent) -> None:
         panel = ctk.CTkFrame(parent, width=352, corner_radius=18, fg_color=CARD,
@@ -251,7 +326,7 @@ class AwardStudio(ctk.CTk):
         self.generate_btn = ctk.CTkButton(
             footer, text="生成奖状", height=46, corner_radius=11,
             fg_color=PRIMARY, hover_color=PRIMARY_HOVER, text_color="#FFFFFF",
-            font=ctk.CTkFont(FONT, 14, "bold"), command=self._start_generate,
+            font=self._mkfont("cta", 14, "bold"), command=self._start_generate,
         )
         self.generate_btn.pack(fill="x")
         self.status_label = ctk.CTkLabel(footer, text="", font=self.font_small,
@@ -300,18 +375,18 @@ class AwardStudio(ctk.CTk):
         self._step_title(wrap, "③", "获奖名额", "前 N 名自动生成奖状")
         qty = ctk.CTkFrame(wrap, fg_color="transparent")
         qty.pack(fill="x", pady=(8, 0))
-        self.qty_label = ctk.CTkLabel(qty, text="5", font=ctk.CTkFont("Segoe UI", 20, "bold"),
-                                      text_color=PRIMARY, width=46, anchor="w")
+        self.qty_label = ctk.CTkLabel(qty, text="5", font=self._mkfont("qty", 20, "bold", "Segoe UI"),
+                                      text_color=PRIMARY, anchor="w")
         self.qty_label.pack(side="left")
-        ctk.CTkLabel(qty, text="名", font=self.font_small, text_color=MUTED).pack(side="left",
-                                                                                padx=(0, 8))
+        ctk.CTkLabel(qty, text="名", font=self.font_small, text_color=MUTED).pack(
+            side="left", padx=(6, 14))
         self.slider = ctk.CTkSlider(
             qty, from_=1, to=20, number_of_steps=19, height=18,
             fg_color="#E6E9F2", progress_color=PRIMARY, button_color=PRIMARY,
             button_hover_color=PRIMARY_HOVER, command=self._on_slider,
         )
         self.slider.set(5)
-        self.slider.pack(side="left", fill="x", expand=True)
+        self.slider.pack(side="left", fill="x", expand=True, padx=(10, 0))
 
         self.tier_switch = ctk.CTkSwitch(
             wrap, text="按名次自动划分一 / 二 / 三等奖", font=self.font_small,
@@ -344,9 +419,9 @@ class AwardStudio(ctk.CTk):
                      width=18).pack(side="left", anchor="n")
         text = ctk.CTkFrame(row, fg_color="transparent")
         text.pack(side="left", fill="x", expand=True, padx=(6, 0))
-        ctk.CTkLabel(text, text=title, font=ctk.CTkFont(FONT, 12, "bold"), text_color=INK,
+        ctk.CTkLabel(text, text=title, font=self._mkfont("step_title", 12, "bold"), text_color=INK,
                      anchor="w").pack(fill="x")
-        ctk.CTkLabel(text, text=subtitle, font=ctk.CTkFont(FONT, 10), text_color=MUTED,
+        ctk.CTkLabel(text, text=subtitle, font=self._mkfont("step_sub", 10), text_color=MUTED,
                      anchor="w").pack(fill="x")
 
     def _build_right(self, parent) -> None:
@@ -381,7 +456,7 @@ class AwardStudio(ctk.CTk):
         head = ctk.CTkFrame(table_card, fg_color="transparent")
         head.grid(row=0, column=0, sticky="ew", padx=18, pady=(14, 0))
         head.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(head, text="排名总览", font=ctk.CTkFont(FONT, 14, "bold"),
+        ctk.CTkLabel(head, text="排名总览", font=self._mkfont("card_title", 14, "bold"),
                      text_color=INK, anchor="w").grid(row=0, column=0, sticky="w")
         self.table_note = ctk.CTkLabel(head, text="同分并列名次，前三名高亮",
                                        font=self.font_small, text_color=MUTED, anchor="w")
@@ -436,11 +511,11 @@ class AwardStudio(ctk.CTk):
         log_card.grid_propagate(False)
         log_card.grid_columnconfigure(0, weight=1)
         log_card.grid_rowconfigure(1, weight=1)
-        ctk.CTkLabel(log_card, text="运行日志", font=ctk.CTkFont(FONT, 11, "bold"),
+        ctk.CTkLabel(log_card, text="运行日志", font=self._mkfont("log_title", 11, "bold"),
                      text_color=MUTED, anchor="w").grid(row=0, column=0, sticky="w",
                                                         padx=18, pady=(10, 2))
         self.log_box = ctk.CTkTextbox(log_card, fg_color="transparent", text_color=INK,
-                                      font=ctk.CTkFont(FONT, 11), border_width=0,
+                                      font=self._mkfont("log", 11), border_width=0,
                                       wrap="word", height=100)
         self.log_box.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 10))
         self.log_box.configure(state="disabled")
@@ -767,6 +842,9 @@ class AwardStudio(ctk.CTk):
             "{{比赛名称}}、{{日期}}、{{编号}}，以及表格里的任意列（如 {{班级}}）。\n"
             "3. 拖动滑块设置前 N 名，开启分档后自动划分一 / 二 / 三等奖。\n"
             "4. 点「生成奖状」，每人一份 Word，文件名形如 01_张三_一等奖.docx。\n\n"
+            "界面字号\n"
+            "右上角的 A- / A+ 可以把界面文字调小或调大（85% / 100% / 112% / 125%），"
+            "选择会自动记住，下次打开还是这个大小。\n\n"
             "小技巧\n"
             "· 表格前几行有标题、说明没关系，表头会在前 20 行内自动定位。\n"
             "· 没有「总分」列但有多位评委列时，分数自动相加。\n"
