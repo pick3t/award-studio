@@ -61,7 +61,15 @@ WARNING = "#D97706"
 DANGER = "#DC2626"
 GOLD = "#B8860B"
 
-FONT = "Microsoft YaHei UI"
+if sys.platform == "darwin":
+    FONT = "PingFang SC"
+    NUM_FONT = "Helvetica Neue"
+elif sys.platform == "win32":
+    FONT = "Microsoft YaHei UI"
+    NUM_FONT = "Segoe UI"
+else:
+    FONT = "Noto Sans CJK SC"
+    NUM_FONT = "DejaVu Sans"
 
 # 界面字号（磅）：以正文 12pt 为基准，整体等比缩放
 WINDOW_W, WINDOW_H = 1300, 860
@@ -282,7 +290,7 @@ class AwardStudio(ctk.CTk):
         self.font_step = self._mkfont("step", 12, "bold")
         self.font_body = self._mkfont("body", 12)
         self.font_small = self._mkfont("small", 11)
-        self.font_num = self._mkfont("num", 22, "bold", "Segoe UI", cap=32)
+        self.font_num = self._mkfont("num", 22, "bold", NUM_FONT, cap=32)
 
         self._setup_style()
         self._build()
@@ -401,7 +409,7 @@ class AwardStudio(ctk.CTk):
         self.badge = badge = ctk.CTkFrame(header, width=44, height=44, corner_radius=13, fg_color=PRIMARY)
         badge.grid(row=0, column=0, rowspan=2, sticky="w")
         badge.grid_propagate(False)
-        ctk.CTkLabel(badge, text="A", font=self._mkfont("badge", 22, "bold", "Segoe UI"),
+        ctk.CTkLabel(badge, text="A", font=self._mkfont("badge", 22, "bold", NUM_FONT),
                      text_color="#FFFFFF").place(relx=0.5, rely=0.5, anchor="center")
 
         ctk.CTkLabel(header, text="Award Studio", font=self.font_h1, text_color=INK,
@@ -805,7 +813,7 @@ class AwardStudio(ctk.CTk):
         qty = ctk.CTkFrame(self.qty_panel, fg_color="transparent")
         qty.pack(fill="x", pady=(6, 0))
         self.qty_label = ctk.CTkLabel(qty, text="5",
-                                      font=self._mkfont("qty", 20, "bold", "Segoe UI"),
+                                      font=self._mkfont("qty", 20, "bold", NUM_FONT),
                                       text_color=PRIMARY, anchor="w")
         self.qty_label.pack(side="left")
         ctk.CTkLabel(qty, text="名", font=self.font_small, text_color=MUTED).pack(
