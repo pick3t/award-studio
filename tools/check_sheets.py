@@ -18,7 +18,15 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 import app as gui  # noqa: E402
+from core.certificate import certificate_filename, inspect_template  # noqa: E402
 from core.excel_reader import ExcelParseError, list_sheets, load_players  # noqa: E402
+from core.ranking import (  # noqa: E402
+    certificate_total,
+    expand_entries,
+    rank_players,
+    split_members,
+    winners_of,
+)
 
 SAMPLE = ROOT / "samples" / "真实场地" / "一号场地成绩单_模拟分数.xlsx"
 
@@ -61,7 +69,30 @@ def main() -> int:
     check(any("太极辅导站" in p.name for p in teams), "集体项目用代表队作为名称")
     check("参赛选手" in teams[0].extras, "参赛选手保留为附加字段，可用于奖状占位符")
 
-    print("\n3) 界面里切换工作表")
+    print("\n3) 集体项目按人发奖状")
+    entries = rank_players(teams, winners=2)
+    winners = winners_of(entries, 2)
+    people = expand_entries(winners)
+    members_total = sum(len(split_members(e.player.extras["参赛选手"])) for e in winners)
+    check(certificate_total(winners) == members_total, f"奖状份数 = 队员总数（{members_total}）")
+    check(len(people) == members_total, f"展开成 {len(people)} 条个人记录")
+    check(all(e.player.name != e.player.extras.get("代表队") for e in people), "姓名换成了个人姓名")
+    check(all(e.player.extras.get("代表队") for e in people), "每人仍保留所属代表队")
+    check(all(" " not in e.player.name for e in people), "个人姓名没有残留空格")
+    first = people[0]
+    name = certificate_filename(first)
+    check(first.player.extras["代表队"] in name, f"文件名带上代表队：{name}")
+
+    print("\n4) 带项目组的模板")
+    template = ROOT / "samples" / "奖状模板_项目组.docx"
+    if template.exists():
+        keys = inspect_template(template)
+        check({"项目组", "参赛项目"} <= set(keys), f"模板包含项目组/参赛项目占位符：{keys}")
+        check({"姓名", "奖项", "名次"} <= set(keys), "模板包含姓名/奖项/名次")
+    else:
+        check(False, "缺少 samples/奖状模板_项目组.docx（运行 tools/make_template.py）")
+
+    print("\n5) 界面里切换工作表")
     window = gui.AwardStudio()
     window.withdraw()
     try:
@@ -82,6 +113,14 @@ def main() -> int:
         window.update_idletasks()
         check(window._target_dir().name == "一场地1组集体", "集体项目也有独立输出目录")
         check(window.sheet_names == sheets, "切换后工作表列表保持不变")
+
+        window._on_heading_click("分数")
+        window.update_idletasks()
+        winners = winners_of(window.entries)
+        expected_count = certificate_total(winners)
+        shown = window.stat_values["awards"].cget("text")
+        check(shown == str(expected_count),
+              f"界面上「奖状份数」按人算：{shown}（队数 {len(winners)}）")
     finally:
         window.destroy()
 

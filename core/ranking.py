@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from .excel_reader import Player
 
@@ -149,6 +149,71 @@ def winners_of(entries: list[RankedEntry], winners: int | None = None) -> list[R
     if winners is None:
         return result
     return result[:winners]
+
+
+MEMBER_KEYS = ("参赛选手", "队员", "成员", "选手名单")
+
+
+def split_members(text: str) -> list[str]:
+    """把「马兴丽 胡菊园 张锐」拆成多人。
+
+    表里用空格分隔队员，两字姓名中间常多打一个空格（张  锐），
+    这里先把连续空格去掉，再按单个空格切分。
+    """
+    if not text:
+        return []
+    cleaned = str(text).replace("\u3000", " ").replace("\n", " ").replace("\r", " ")
+    cleaned = re.sub(r" {2,}", "", cleaned).strip()
+    tokens = [token for token in cleaned.split(" ") if token]
+    # 兜底：剩下的单字与下一个单字合并（"李 佩"）
+    merged: list[str] = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if len(token) == 1 and index + 1 < len(tokens) and len(tokens[index + 1]) == 1:
+            merged.append(token + tokens[index + 1])
+            index += 2
+            continue
+        merged.append(token)
+        index += 1
+    return merged
+
+
+def members_of(entry: RankedEntry) -> list[str]:
+    """这一条记录里包含的队员名单（个人项目返回空列表）。"""
+    for key in MEMBER_KEYS:
+        value = entry.player.extras.get(key, "")
+        members = split_members(value)
+        if len(members) > 1:
+            return members
+    return []
+
+
+def expand_entries(entries: list[RankedEntry]) -> list[RankedEntry]:
+    """集体项目：一队多人时拆成每人一条，保证一人一份奖状。"""
+    expanded: list[RankedEntry] = []
+    for entry in entries:
+        members = members_of(entry)
+        if not members:
+            expanded.append(entry)
+            continue
+        team = entry.player.name
+        roster = " ".join(members)
+        for position, name in enumerate(members, start=1):
+            extras = dict(entry.player.extras)
+            extras["代表队"] = team
+            extras["参赛选手"] = roster
+            # 一队多人时证书编号加后缀，避免每份都写同一个号
+            no = entry.player.no
+            number = f"{no}-{position}" if no else str(position)
+            player = replace(entry.player, name=name, no=number, extras=extras)
+            expanded.append(replace(entry, player=player))
+    return expanded
+
+
+def certificate_total(entries: list[RankedEntry]) -> int:
+    """这些获奖记录最终要生成多少份奖状（集体项目按人算）。"""
+    return len(expand_entries(entries))
 
 
 def safe_filename(text: str, fallback: str = "certificate") -> str:

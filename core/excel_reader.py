@@ -97,6 +97,7 @@ class ParseReport:
     columns: dict[str, list[int]] = field(default_factory=dict)
     total_rows: int = 0
     title: str = ""
+    subtitle: str = ""      # 表头上方第二行，通常是「项目X：… 第N组」
 
     def describe(self) -> str:
         parts = []
@@ -233,6 +234,25 @@ def _resolve_header(rows: list[tuple[int, list[Any]]],
         if _row_score(merged, "score") >= 60:
             return row_no, merged, row_no + 2
     return None, [], 0
+
+
+def _detect_subtitle(rows: list[tuple[int, list[Any]]], header_row: int) -> str:
+    """表头上方最后一行非空文字（「项目一：内家拳类 第一场地 第 1 组」）。"""
+    texts: list[str] = []
+    for row_no, values in rows:
+        if row_no >= header_row:
+            break
+        for value in values:
+            raw = _cell_text(value)
+            text = re.sub(r"\s+", " ", raw).strip()
+            if text and len(text) > 2:
+                texts.append(text)
+                break
+    if len(texts) <= 1:
+        return ""
+    subtitle = texts[-1]
+    # 「项目四：传统南拳类 第一场地 第4 组」→ 去掉「项目四：」，模板里已有「项目组：」标签
+    return re.sub(r"^项目[一二三四五六七八九十0-9]+[:：]\s*", "", subtitle)
 
 
 def _detect_title(rows: list[tuple[int, list[Any]]], header_row: int) -> str:
@@ -440,6 +460,7 @@ def load_players(path: str | Path, sheet_name: str | None = None) -> tuple[list[
         columns=columns,
         total_rows=len(players),
         title=_detect_title(rows, header_row),
+        subtitle=_detect_subtitle(rows, header_row),
     )
     workbook.close()
     reader.close()

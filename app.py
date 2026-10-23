@@ -49,6 +49,8 @@ from core import settings as prefs  # noqa: E402
 from core.excel_reader import ExcelParseError, list_sheets, load_players  # noqa: E402
 from core.ranking import (  # noqa: E402
     award_conflicts,
+    certificate_total,
+    expand_entries,
     rank_players,
     safe_filename,
     winners_of,
@@ -247,6 +249,7 @@ class AwardStudio(ctk.CTk):
         self.max_winners = 20
         self.excel_title = ""
         self.sheet_names: list[str] = []
+        self.sheet_subtitle = ""
         self.current_sheet = ""
         self._last_sheet_error = ""
         self.ui_queue: queue.Queue = queue.Queue()
@@ -1125,6 +1128,7 @@ class AwardStudio(ctk.CTk):
         self.players = players
         self.current_sheet = sheet
         self.excel_title = report.title
+        self.sheet_subtitle = report.subtitle
         self.column_names = list(players[0].fields.keys()) if players else []
         score_idx = report.columns.get("score", [])
         self.score_column_names = [report.headers[i] for i in score_idx
@@ -2001,6 +2005,7 @@ class AwardStudio(ctk.CTk):
             return
         scores = [p.score for p in self.players]
         winners = winners_of(self.entries)
+        people = expand_entries(winners)
         self.stat_values["total"].configure(text=str(len(self.players)))
         if not self.score_columns:
             # 没有选择评判列就不做分数统计，避免暗示已经排过序
@@ -2009,20 +2014,21 @@ class AwardStudio(ctk.CTk):
         else:
             self.stat_values["max"].configure(text=f"{max(scores):g}")
             self.stat_values["avg"].configure(text=f"{sum(scores) / len(scores):.1f}")
-        self.stat_values["awards"].configure(text=str(len(winners)) if self.score_columns else "—")
+        self.stat_values["awards"].configure(
+            text=str(len(people)) if self.score_columns else "—")
         if not self.score_columns:
             # 没选评判列就没有名次，也就没有奖项可分配
             self.merge_hint.configure(text="未选评判列 · 暂不分配奖项")
             return
         if bool(self.award_switch.get()):
             tiers: dict[str, int] = {}
-            for entry in winners:
+            for entry in people:
                 key = entry.award or "未定奖项"
                 tiers[key] = tiers.get(key, 0) + 1
             parts = " · ".join(f"{name} {count} 人" for name, count in tiers.items())
             self.merge_hint.configure(text=parts)
         else:
-            self.merge_hint.configure(text=f"仅排名次 · 前 {len(winners)} 名")
+            self.merge_hint.configure(text=f"仅排名次 · 共 {len(people)} 份奖状")
 
     def _sync_buttons(self) -> None:
         ready = bool(self.excel_path and self.template_path and not self.busy
@@ -2051,18 +2057,19 @@ class AwardStudio(ctk.CTk):
         if not winners:
             messagebox.showinfo("没有获奖者", "请设置大于 0 的获奖名额。")
             return
+        total_certificates = certificate_total(winners)
 
         context = CertificateContext(
             contest=self._guess_contest(),
             issuer="大赛组委会",
             date=date.today().strftime("%Y 年 %m 月 %d 日"),
-            extra={},
+            extra={"项目组": self.sheet_subtitle} if self.sheet_subtitle else {},
         )
         self.busy = True
         self.generate_btn.configure(state="disabled", text="正在生成…", fg_color="#9CA3AF")
-        self.status_label.configure(text=f"正在生成 {len(winners)} 份奖状…", text_color=PRIMARY)
+        self.status_label.configure(text=f"正在生成 {total_certificates} 份奖状…", text_color=PRIMARY)
         out_dir = self._target_dir() or self.output_dir
-        self._log(f"开始生成 {len(winners)} 份奖状 → {out_dir}", "info")
+        self._log(f"开始生成 {total_certificates} 份奖状 → {out_dir}", "info")
 
         threading.Thread(
             target=self._worker,
@@ -2094,7 +2101,8 @@ class AwardStudio(ctk.CTk):
         failures: list[str] = []
         try:
             out_dir.mkdir(parents=True, exist_ok=True)
-            for entry in winners:
+            # 集体项目一队多人：拆开，一人一份
+            for entry in expand_entries(winners):
                 path = out_dir / certificate_filename(entry)
                 # 同分同名（不同单位同名选手）时避免互相覆盖
                 if path.exists():
@@ -2227,6 +2235,10 @@ class AwardStudio(ctk.CTk):
             "只勾一列就按那一列排序；勾多列会自动算出「合计」和「平均」并按合计排名。\n"
             "· 一列都没勾时程序完全不排序：名次、奖项都显示「—」，行顺序就是 Excel 里的原始顺序，"
             "生成按钮也是灰的。再点一次表头可以取消勾选、回到原始顺序。\n"
+            "· 集体项目：一行代表一支队，「参赛选手」按空格拆开，每人一份奖状，"
+            "{{代表队}} 填队名；同队的名次奖项一致。\n"
+            "· 模板里可写 {{项目组}}（第几组/场地组）、{{参赛项目}}、{{代表队}}，会自动从成绩表取；"
+            "个人项目没有代表队时用「单位」顶上。\n"
             "· 同分的选手一定拿同一个奖。如果同分人数超过某个奖项的名额，整组都会按该奖项发放，"
             "并在奖项设置下方提示你按实际人数改一下名额。\n"
             "· 映射面板占地方，点「收起映射」可以折起来，需要时再展开。"

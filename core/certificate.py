@@ -20,7 +20,7 @@ from docx.oxml.ns import qn
 from docx.opc.constants import RELATIONSHIP_TYPE as RT
 
 from . import fields as field_rules
-from .ranking import RankedEntry, safe_filename
+from .ranking import RankedEntry, expand_entries, safe_filename
 
 PLACEHOLDER_RE = re.compile(r"\{\{\s*([^{}]{1,40}?)\s*\}\}|【\s*([^【】]{1,20}?)\s*】")
 
@@ -163,6 +163,19 @@ def build_mapping(entry: RankedEntry, context: CertificateContext) -> dict[str, 
     }
     mapping.update(context.extra)
     mapping.update(player.extras)
+    # 模板里可能写 {{项目组}} / {{参赛项目}}，而表头是「组别」「项目名称」或反过来
+    for alias, keys in (
+        ("项目组", ("组别", "项目组", "组")),
+        ("参赛项目", ("项目名称", "参赛项目", "项目")),
+        ("代表队", ("代表队", "单位")),
+    ):
+        if mapping.get(alias):
+            continue
+        for key in keys:
+            value = mapping.get(key)
+            if value:
+                mapping[alias] = value
+                break
     return mapping
 
 
@@ -205,8 +218,16 @@ def generate_certificate(
 
 
 def certificate_filename(entry: RankedEntry) -> str:
-    """奖状文件名：01_张三_一等奖.docx（不设奖项时省略奖项部分）"""
-    parts = [f"{entry.rank:02d}", safe_filename(entry.player.name)]
+    """奖状文件名：01_张三_一等奖.docx
+
+    集体项目拆成每人一份时带上代表队：01_一队_张三_一等奖.docx
+    （不设奖项时省略奖项部分）
+    """
+    parts = [f"{entry.rank:02d}"]
+    team = entry.player.extras.get("代表队", "")
+    if team and team != entry.player.name:
+        parts.append(safe_filename(team))
+    parts.append(safe_filename(entry.player.name))
     if entry.award:
         parts.append(safe_filename(entry.award))
     return "_".join(parts) + ".docx"
@@ -267,8 +288,14 @@ def generate_all(
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     created: list[Path] = []
-    for entry in winners:
+    # 集体项目一队多人：拆成每人一份
+    for entry in expand_entries(winners):
         path = out_dir / certificate_filename(entry)
+        if path.exists():
+            stem, suffix, index = path.stem, path.suffix, 2
+            while path.exists():
+                path = out_dir / f"{stem}_{index}{suffix}"
+                index += 1
         generate_certificate(template, path, entry, context, rules=rules)
         created.append(path)
 

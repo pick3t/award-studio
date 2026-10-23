@@ -77,7 +77,24 @@ def fill(path: Path, out_dir: Path | None = None) -> Path:
                 continue
             ws.cell(row=row, column=col).value = round(rng.uniform(8.30, 9.90), 2)
             filled += 1
-        report.append(f"  [{ws.title}] 得分列第 {col} 列（表头第 {header_row} 行），填入 {filled} 行")
+        # 队员名单里的两字姓名常多打一个空格（张  锐），压掉避免拆分出错
+        member_col = None
+        header_texts = [_norm(ws.cell(row=header_row, column=c).value)
+                        for c in range(1, ws.max_column + 1)]
+        for idx, text_value in enumerate(header_texts):
+            if any(hint in text_value for hint in ("选手", "队员", "成员")):
+                member_col = idx + 1
+                break
+        if member_col:
+            for row in range(start, ws.max_row + 1):
+                cell = ws.cell(row=row, column=member_col)
+                if isinstance(cell.value, str):
+                    cell.value = re.sub(r"(?<=[\u4e00-\u9fff]) {2,}(?=[\u4e00-\u9fff])",
+                                        "", cell.value)
+        report.append(
+            f"  [{ws.title}] 得分列第 {col} 列（表头第 {header_row} 行），填入 {filled} 行"
+            + ("，已规范队员名单空格" if member_col else "")
+        )
 
     target_dir = out_dir or path.parent
     target = target_dir / f"{path.stem}_模拟分数.xlsx"
