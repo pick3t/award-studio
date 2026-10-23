@@ -14,6 +14,9 @@ dist/
 output/
 diag.txt
 
+# 真实成绩单（含选手姓名，不入库）
+samples/真实场地/
+
 # 系统
 .DS_Store
 Thumbs.db

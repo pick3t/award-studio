@@ -34,7 +34,7 @@ DATA_DIR = Path(sys.executable).parent if getattr(sys, "frozen", False) else BAS
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
-APP_VERSION = "1.1.2"
+APP_VERSION = "1.2.0"
 
 from core.certificate import (  # noqa: E402
     CertificateContext,
@@ -46,8 +46,13 @@ from core.certificate import (  # noqa: E402
 )
 from core import fields as field_rules  # noqa: E402
 from core import settings as prefs  # noqa: E402
-from core.excel_reader import ExcelParseError, load_players  # noqa: E402
-from core.ranking import award_conflicts, rank_players, winners_of  # noqa: E402
+from core.excel_reader import ExcelParseError, list_sheets, load_players  # noqa: E402
+from core.ranking import (  # noqa: E402
+    award_conflicts,
+    rank_players,
+    safe_filename,
+    winners_of,
+)
 
 # ------------------------------------------------------------------ 设计令牌
 BG = "#F3F5FA"
@@ -241,6 +246,9 @@ class AwardStudio(ctk.CTk):
         self.quota = 5
         self.max_winners = 20
         self.excel_title = ""
+        self.sheet_names: list[str] = []
+        self.current_sheet = ""
+        self._last_sheet_error = ""
         self.ui_queue: queue.Queue = queue.Queue()
         self.generated: list[Path] = []
         self.busy = False
@@ -303,6 +311,10 @@ class AwardStudio(ctk.CTk):
 
         if demo:
             self.after(300, self._load_demo)
+        # 支持把 xlsx 直接拖到 exe 图标上（资源管理器会把路径作为参数传进来）
+        startup = self._argv_file()
+        if startup:
+            self.after(300, lambda: self._load_excel(startup))
         if "--diag" in sys.argv:
             self.after(1200, self._write_diag)
 
@@ -321,6 +333,9 @@ class AwardStudio(ctk.CTk):
             ("icon_png", lambda: (BASE_DIR / "assets" / "icon.png").exists()),
             ("icon_ico", lambda: (BASE_DIR / "assets" / "icon.ico").exists()),
             ("logo", lambda: type(self.badge).__name__),
+            ("sheet_count", lambda: len(self.sheet_names)),
+            ("sheet", lambda: self.current_sheet),
+            ("players", lambda: len(self.players)),
             ("win_icon", lambda: bool(getattr(self, "_icon_photo", None))),
         ]
         for name, fn in probes:
@@ -334,6 +349,17 @@ class AwardStudio(ctk.CTk):
             pass
 
     # -------------------------------------------------------------- 布局
+    @staticmethod
+    def _argv_file() -> Path | None:
+        """命令行里带的成绩表路径（把 xlsx 拖到 exe 图标上时会传进来）。"""
+        for arg in sys.argv[1:]:
+            if arg.startswith("-"):
+                continue
+            candidate = Path(arg)
+            if candidate.suffix.lower() in {".xlsx", ".xlsm"} and candidate.exists():
+                return candidate
+        return None
+
     def _set_window_icon(self) -> None:
         """窗口图标：先用 ico（同时关掉 CustomTkinter 自带的默认图标），再叠 PNG。
 
@@ -951,10 +977,19 @@ class AwardStudio(ctk.CTk):
         self.table_note = ctk.CTkLabel(head, text="点表头数字列选择排名依据",
                                        font=self.font_small, text_color=MUTED, anchor="w")
         self.table_note.grid(row=1, column=0, sticky="w")
+        self.sheet_menu = ctk.CTkOptionMenu(
+            head, values=["—"], width=self._px(168), height=self._px(28), corner_radius=8,
+            font=self.font_small, dropdown_font=self.font_small,
+            fg_color="#F2F4FC", button_color="#E3E7F6", button_hover_color="#D7DCF0",
+            text_color=INK, dropdown_fg_color=CARD, dropdown_text_color=INK,
+            dropdown_hover_color=PRIMARY_SOFT, command=self._on_sheet_change)
+        self.sheet_menu.grid(row=0, column=1, sticky="e")
+        self.sheet_menu.grid_remove()
+
         self.merge_hint = ctk.CTkLabel(head, text="",
                                        font=self._mkfont("merge_hint", 11, cap=16),
                                        text_color=PRIMARY, anchor="e")
-        self.merge_hint.grid(row=0, column=1, rowspan=2, sticky="e")
+        self.merge_hint.grid(row=1, column=1, sticky="e")
 
         ctk.CTkFrame(table_card, height=1, fg_color=LINE).grid(row=1, column=0, sticky="ew",
                                                               padx=18, pady=(12, 0))
@@ -1015,35 +1050,112 @@ class AwardStudio(ctk.CTk):
             self._load_excel(Path(path))
 
     def _load_excel(self, path: Path) -> None:
+        """打开工作簿：列出全部工作表，自动选第一个能读出选手的。"""
         try:
-            players, warnings, report = load_players(path)
-        except ExcelParseError as exc:
-            messagebox.showerror("读取失败", str(exc))
+            sheets = list_sheets(path)
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("读取失败", f"无法打开表格：{exc}")
             self._log(f"读取失败：{exc}", "err")
+            return
+        if not sheets:
+            messagebox.showerror("读取失败", "这个工作簿里没有工作表")
             return
 
         self.excel_path = path
+        self.sheet_names = sheets
+        self.excel_btn.configure(text=short(path.name, 24), text_color=INK)
+        self._render_sheet_menu()
+
+        errors: list[str] = []
+        for name in sheets:
+            if self._apply_sheet(name, quiet=True):
+                break
+            errors.append(f"「{name}」{self._last_sheet_error}")
+        else:
+            # 一个表都读不出来：清空界面并说明原因
+            self.players = []
+            self.entries = []
+            self.current_sheet = ""
+            self._build_table()
+            self._refresh_table()
+            self._refresh_stats()
+            detail = "\n".join(errors[:5]) or "没有读到任何数据"
+            self._log(f"读取失败：{detail}", "err")
+            messagebox.showerror(
+                "读取失败",
+                "这个文件里没有能用的成绩表。\n\n" + detail +
+                "\n\n常见原因：分数列还没填，或者表头里缺少「姓名 / 得分」两列。",
+            )
+        self._sync_buttons()
+
+    def _render_sheet_menu(self) -> None:
+        """工作表下拉：只有一个表时藏起来。"""
+        menu = getattr(self, "sheet_menu", None)
+        if menu is None:
+            return
+        if len(self.sheet_names) > 1:
+            menu.configure(values=list(self.sheet_names))
+            menu.grid()
+        else:
+            menu.grid_remove()
+
+    def _on_sheet_change(self, sheet: str) -> None:
+        if not self.excel_path or not sheet or sheet == self.current_sheet:
+            return
+        if self._apply_sheet(sheet, keep_columns=True):
+            self._log(f"切换到工作表「{sheet}」", "info")
+            self._sync_buttons()
+        else:
+            if self.current_sheet:
+                self.sheet_menu.set(self.current_sheet)
+            messagebox.showerror("读取失败", f"「{sheet}」{self._last_sheet_error}")
+
+    def _apply_sheet(self, sheet: str, keep_columns: bool = False, quiet: bool = False) -> bool:
+        """把某个工作表读进来并刷新界面；成功返回 True。"""
+        if not self.excel_path:
+            return False
+        try:
+            players, warnings, report = load_players(self.excel_path, sheet_name=sheet)
+        except ExcelParseError as exc:
+            self._last_sheet_error = str(exc)
+            if not quiet:
+                self._log(f"「{sheet}」读取失败：{exc}", "err")
+            return False
+
         self.players = players
+        self.current_sheet = sheet
         self.excel_title = report.title
         self.column_names = list(players[0].fields.keys()) if players else []
         score_idx = report.columns.get("score", [])
         self.score_column_names = [report.headers[i] for i in score_idx
                                    if i < len(report.headers)] if score_idx else []
-        # 不预置任何评判列，全部交给用户点表头勾选
-        self.score_columns = []
+
+        if keep_columns:
+            available = set(players[0].fields.keys()) if players else set()
+            self.score_columns = [
+                col for col in self.score_columns
+                if col in available or (col == "分数" and self.score_column_names)
+            ]
+        else:
+            # 不预置任何评判列，全部交给用户点表头勾选
+            self.score_columns = []
+
         self._apply_score_columns()
         self._build_table()
-        self.excel_btn.configure(text=short(path.name, 24), text_color=INK)
+        if getattr(self, "sheet_menu", None) is not None:
+            self.sheet_menu.set(sheet)
         self.excel_hint.configure(
             text=f"{report.sheet} · 表头第 {report.header_row} 行 · {report.describe()}",
             text_color=MUTED,
         )
-        self._log(f"已读取 {len(players)} 名选手：{path.name}", "ok")
-        for warning in warnings:
+        self._log(f"「{sheet}」读取 {len(players)} 条：{self.excel_path.name}", "ok")
+        for warning in warnings[:6]:
             self._log("  " + warning, "warn")
+        if len(warnings) > 6:
+            self._log(f"  ……另有 {len(warnings) - 6} 行分数无效已跳过", "warn")
 
-        if self.output_dir is None:
-            self.output_dir = path.parent / "output" / "奖状"
+        if self.output_dir is None and self.excel_path:
+            self.output_dir = self.excel_path.parent / "output" / "奖状"
         self._update_output_hint()
 
         # 名额上限跟着人数走，表格里有多少人就能选多少
@@ -1055,6 +1167,7 @@ class AwardStudio(ctk.CTk):
         self.qty_label.configure(text=str(self.winners))
         self._refresh_field_rules()
         self._recalculate()
+        return True
 
     def _choose_template(self) -> None:
         path = filedialog.askopenfilename(
@@ -1190,13 +1303,22 @@ class AwardStudio(ctk.CTk):
             self._update_output_hint()
             self._sync_buttons()
 
+    def _target_dir(self) -> Path | None:
+        """实际输出目录：一个工作簿里有多个项目时，按工作表再分一层。"""
+        if not self.output_dir:
+            return None
+        if self.current_sheet and len(self.sheet_names) > 1:
+            return self.output_dir / safe_filename(self.current_sheet)
+        return self.output_dir
+
     def _update_output_hint(self) -> None:
-        if self.output_dir:
+        target = self._target_dir()
+        if target:
             try:
-                shown = self.output_dir.relative_to(BASE_DIR)
+                shown = target.relative_to(BASE_DIR)
                 text = f"输出到：{shown}"
             except ValueError:
-                text = f"输出到：{short(str(self.output_dir), 40)}"
+                text = f"输出到：{short(str(target), 40)}"
             self.status_label.configure(text=text, text_color=MUTED)
 
     def _on_slider(self, value: float) -> None:
@@ -1706,7 +1828,11 @@ class AwardStudio(ctk.CTk):
                         specs.append(("total", "合计", 112, "center"))
                         specs.append(("avg", "平均", 104, "center"))
                     elif len(selected) == 1:
-                        label = "总分" if "分数" in selected else "排名分"
+                        # 勾的是原表分数列时沿用表头原名（如「最后得分」），勾评委列时叫「排名分」
+                        if selected == ["分数"] and self.score_column_names:
+                            label = self.score_column_names[0]
+                        else:
+                            label = "总分" if "分数" in selected else "排名分"
                         specs.append(("分数", label, 112, "center"))
                     elif len(self.score_column_names) <= 1:
                         # 表里本来就只有一列分数，原样展示给用户勾选
@@ -1828,7 +1954,7 @@ class AwardStudio(ctk.CTk):
         if not self.players:
             note.configure(text="同分并列名次 · 前三名高亮")
         elif not self.score_columns:
-            note.configure(text="未选评判列：按表格原始顺序显示 · 点表头数字列勾选后才排名")
+            note.configure(text="未选评判列 · 按原始顺序 · 点表头数字列勾选")
         else:
             names = "、".join(self.score_columns)
             note.configure(text=f"排名依据：{names}")
@@ -1935,11 +2061,12 @@ class AwardStudio(ctk.CTk):
         self.busy = True
         self.generate_btn.configure(state="disabled", text="正在生成…", fg_color="#9CA3AF")
         self.status_label.configure(text=f"正在生成 {len(winners)} 份奖状…", text_color=PRIMARY)
-        self._log(f"开始生成 {len(winners)} 份奖状 → {self.output_dir}", "info")
+        out_dir = self._target_dir() or self.output_dir
+        self._log(f"开始生成 {len(winners)} 份奖状 → {out_dir}", "info")
 
         threading.Thread(
             target=self._worker,
-            args=(self.template_path, self.output_dir, winners, context,
+            args=(self.template_path, out_dir, winners, context,
                   bool(self.merge_check.get()), list(self.field_rules)),
             daemon=True,
         ).start()
@@ -1969,6 +2096,12 @@ class AwardStudio(ctk.CTk):
             out_dir.mkdir(parents=True, exist_ok=True)
             for entry in winners:
                 path = out_dir / certificate_filename(entry)
+                # 同分同名（不同单位同名选手）时避免互相覆盖
+                if path.exists():
+                    stem, suffix, index = path.stem, path.suffix, 2
+                    while path.exists():
+                        path = out_dir / f"{stem}_{index}{suffix}"
+                        index += 1
                 try:
                     generate_certificate(template, path, entry, context, rules=rules)
                     created.append(path)

@@ -28,7 +28,12 @@ class ExcelParseError(Exception):
 NAME_ALIASES = (
     "姓名", "名字", "选手", "选手姓名", "参赛者", "参赛选手", "参赛人员",
     "学生姓名", "队员", "队员姓名", "人员", "人员姓名", "姓名name", "name",
+    # 集体项目按队发奖状：有「代表队」时优先用它当名称
+    "代表队", "参赛队", "队名", "团队", "队伍",
 )
+
+# 这些表头说明这一列是「队」而不是「人」，集体项目用它作为获奖主体
+TEAM_NAME_ALIASES = ("代表队", "参赛队", "队名", "团队", "队伍")
 SCORE_ALIASES = (
     "总分", "总得分", "最终得分", "综合得分", "合计得分", "分数", "得分",
     "成绩", "评分", "总成绩", "总分值", "score", "totalscore", "marks",
@@ -131,6 +136,20 @@ def _role_score(header: Any, aliases: tuple[str, ...]) -> int:
     return best
 
 
+def _is_team_header(header: Any) -> bool:
+    return _norm(header) in {_norm(alias) for alias in TEAM_NAME_ALIASES}
+
+
+def clean_name(text: str) -> str:
+    """去掉姓名里的多余空格：「王  峰」→「王峰」；英文名保留单个空格。"""
+    text = text.strip()
+    if not text:
+        return text
+    if re.search(r"[\u4e00-\u9fff]", text):
+        return re.sub(r"\s+", "", text)
+    return re.sub(r"\s+", " ", text)
+
+
 def parse_score(value: Any) -> float | None:
     """把单元格里的分数解析成 float，失败返回 None。"""
     if value is None or isinstance(value, bool):
@@ -171,6 +190,51 @@ def _detect_header(rows: list[tuple[int, list[Any]]]) -> int | None:
     return best_row
 
 
+def _header_text(value: Any) -> str:
+    """表头文字：换行合并掉（「最后\n得分」→「最后得分」）。"""
+    text = _cell_text(value)
+    if re.search(r"[\u4e00-\u9fff]", text):
+        return re.sub(r"\s+", "", text)
+    return re.sub(r"\s+", " ", text)
+
+
+def _row_score(values: list[Any], role: str) -> int:
+    aliases = {"name": NAME_ALIASES, "score": SCORE_ALIASES, "no": NO_ALIASES}[role]
+    best = 0
+    for value in values:
+        best = max(best, _role_score(value, aliases))
+    return best
+
+
+def _resolve_header(rows: list[tuple[int, list[Any]]],
+                    raw_rows: dict[int, list[Any]]) -> tuple[int | None, list[str], int]:
+    """定位表头，返回 (表头行, 表头文字, 数据起始行)。
+
+    兼容「最后」在第 3 行、「得分」在第 4 行的竖向合并表头。
+    """
+    header_row = _detect_header(rows)
+    if header_row is not None:
+        return header_row, [_header_text(v) for v in raw_rows[header_row]], header_row + 1
+
+    for row_no, values in rows:
+        # 这一行有姓名但找不到分数列，下一行又没有姓名/数字，就把两行拼起来再试
+        if _row_score(values, "name") < 60 or _row_score(values, "score") >= 60:
+            continue
+        nxt = raw_rows.get(row_no + 1)
+        if not nxt or _row_score(nxt, "name") >= 60:
+            continue
+        if any(isinstance(v, (int, float)) for v in nxt):
+            continue
+        merged = []
+        for i in range(max(len(values), len(nxt))):
+            head = _header_text(values[i]) if i < len(values) else ""
+            tail = _header_text(nxt[i]) if i < len(nxt) else ""
+            merged.append(f"{head}{tail}".strip())
+        if _row_score(merged, "score") >= 60:
+            return row_no, merged, row_no + 2
+    return None, [], 0
+
+
 def _detect_title(rows: list[tuple[int, list[Any]]], header_row: int) -> str:
     """表头上方第一行非空文字，当成比赛名称的候选。"""
     for row_no, values in rows:
@@ -186,7 +250,7 @@ def _detect_title(rows: list[tuple[int, list[Any]]], header_row: int) -> str:
 def _map_columns(header_values: list[Any]) -> dict[str, list[int]]:
     """把每一列归类到 name / score / no / extra。"""
     columns: dict[str, list[int]] = {"name": [], "score": [], "no": [], "extra": []}
-    best_scores: dict[str, list[int]] = {"name": [], "score": [], "no": [], "extra": []}
+    best: dict[str, dict[int, int]] = {"name": {}, "score": {}, "no": {}, "extra": {}}
     for idx, value in enumerate(header_values):
         candidate = None
         for role, aliases in (
@@ -201,14 +265,21 @@ def _map_columns(header_values: list[Any]) -> dict[str, list[int]]:
         if candidate:
             role, score = candidate
             columns[role].append(idx)
-            best_scores[role].append(score)
+            best[role][idx] = score
 
-    # 每个角色只保留得分最高的列，score 列允许多个（多评委）
-    for role in ("name", "no"):
-        if columns[role]:
-            top = max(best_scores[role])
-            keep = [c for c, s in zip(columns[role], best_scores[role]) if s == top]
-            columns[role] = [keep[0]]
+    # 名称列：集体项目优先用「代表队」，否则取得分最高的那一列
+    if columns["name"]:
+        team_cols = [c for c in columns["name"] if _is_team_header(header_values[c])]
+        if team_cols:
+            columns["name"] = [team_cols[0]]
+        else:
+            scores = best["name"]
+            top = max(scores.values())
+            columns["name"] = [next(c for c in columns["name"] if scores[c] == top)]
+    if columns["no"]:
+        scores = best["no"]
+        top = max(scores.values())
+        columns["no"] = [next(c for c in columns["no"] if scores[c] == top)]
 
     if columns["score"]:
         norms = [_norm(header_values[i]) for i in columns["score"]]
@@ -287,15 +358,15 @@ def load_players(path: str | Path, sheet_name: str | None = None) -> tuple[list[
         if any(v not in (None, "") for v in values):
             rows.append((row_no, values))
 
-    header_row = _detect_header(rows)
+    header_row, headers, data_start = _resolve_header(rows, raw_rows)
     if header_row is None:
         workbook.close()
         raise ExcelParseError(
-            "没找到表头：需要同时包含「姓名」（或 选手/参赛者）和「分数」（或 总分/成绩/得分）两列"
+            "没找到表头：需要同时包含「姓名」（或 选手/参赛者/代表队）"
+            "和「分数」（或 总分/成绩/得分）两列"
         )
 
-    headers = [_cell_text(v) for v in raw_rows[header_row]]
-    columns = _map_columns(raw_rows[header_row])
+    columns = _map_columns(headers)
     if not columns["name"] or not columns["score"]:
         workbook.close()
         raise ExcelParseError("识别到表头，但姓名列或分数列定位失败")
@@ -308,19 +379,19 @@ def load_players(path: str | Path, sheet_name: str | None = None) -> tuple[list[
     if no_col is not None:
         used_cols.add(no_col)
     extra_cols = [
-        i for i in range(len(raw_rows[header_row]))
-        if i not in used_cols and _cell_text(raw_rows[header_row][i])
+        i for i in range(len(headers))
+        if i not in used_cols and headers[i]
     ]
 
     players: list[Player] = []
     warnings: list[str] = []
     header_texts = {_norm(headers[i]) for i in range(len(headers))}
 
-    for row_no in range(header_row + 1, worksheet.max_row + 1):
+    for row_no in range(data_start, worksheet.max_row + 1):
         values = [reader.get(row_no, c) for c in range(1, max_col + 1)]
         if all(v in (None, "") for v in values):
             continue
-        name = _cell_text(values[name_col]) if name_col < len(values) else ""
+        name = clean_name(_cell_text(values[name_col])) if name_col < len(values) else ""
         # 跳过重复表头、纯说明行
         if not name or _norm(name) in header_texts:
             continue
