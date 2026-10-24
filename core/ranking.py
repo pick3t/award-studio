@@ -157,26 +157,10 @@ MEMBER_KEYS = ("参赛选手", "队员", "成员", "选手名单")
 def split_members(text: str) -> list[str]:
     """把「马兴丽 胡菊园 张锐」拆成多人。
 
-    表里用空格分隔队员，但两字姓名中间也常多打空格（张  锐），
-    而分隔符也有时是两个空格（翁素维  张月珍），单看空格数无法区分。
-    所以按任意空白切成 token 后，只把「单字 + 单字」粘起来：
-    中文姓名至少两个字，单字 token 必定是被空格劈开的两字名。
+    约定：队员之间用一个空格分隔，两字姓名中间不带空格。
+    该约定由成绩表保证，程序不做额外猜测。
     """
-    if not text:
-        return []
-    cleaned = str(text).replace("\u3000", " ").replace("\n", " ").replace("\r", " ")
-    tokens = [token for token in cleaned.split(" ") if token]
-    merged: list[str] = []
-    index = 0
-    while index < len(tokens):
-        token = tokens[index]
-        if len(token) == 1 and index + 1 < len(tokens) and len(tokens[index + 1]) == 1:
-            merged.append(token + tokens[index + 1])
-            index += 2
-            continue
-        merged.append(token)
-        index += 1
-    return merged
+    return str(text or "").split()
 
 
 def members_of(entry: RankedEntry) -> list[str]:
