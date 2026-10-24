@@ -41,6 +41,8 @@
 - **Windows** 首次运行会提示「已保护你的电脑」，点「更多信息 → 仍要运行」即可
 - **macOS** 首次会被 Gatekeeper 拦住，在 Finder 里**右键**点 App → 打开 → 再点「打开」，或执行一次 `xattr -dr com.apple.quarantine /Applications/AwardStudio.app`
 
+> macOS 版本目前使用系统默认应用图标（Windows 版已是自定义图标）。
+>
 > macOS 目前只构建 Apple Silicon（M 系列）版本。Intel Mac 可以 clone 仓库后 `python app.py` 运行，或把 `.github/workflows/build.yml` 里的 `macos-latest` 改成 `macos-13` 自行构建。
 >
 > 打 `v*` 标签会自动触发 Actions 构建两个平台并附加到 Release；也可以在 Actions 页面手动运行 `Build Release`。
