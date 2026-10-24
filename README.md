@@ -250,6 +250,12 @@ AwardStudio/
 
 ## 更新记录
 
+**v1.2.2**
+
+- 修复 macOS / Linux 上「生成完是否打开输出文件夹」报错 `module 'os' has no attribute 'startfile'`
+  （改为 Windows 用 startfile、macOS 用 open、Linux 用 xdg-open）
+- 双击排名表打开单份奖状同样受益
+
 **v1.2.1**
 
 - 队员拆分回归一行 `split()`：程序只按空格切，正确性由成绩表约定保证（不再做空格数量猜测）

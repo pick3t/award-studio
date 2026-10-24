@@ -10,6 +10,7 @@ from __future__ import annotations
 import calendar
 import os
 import queue
+import subprocess
 import re
 import sys
 import threading
@@ -34,7 +35,7 @@ DATA_DIR = Path(sys.executable).parent if getattr(sys, "frozen", False) else BAS
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
-APP_VERSION = "1.2.1"
+APP_VERSION = "1.2.2"
 
 from core.certificate import (  # noqa: E402
     CertificateContext,
@@ -209,6 +210,20 @@ class DatePicker(ctk.CTkToplevel):
 
     def _pick_today(self) -> None:
         self._pick(self.today)
+
+
+def open_path(path) -> None:
+    """用系统默认程序打开文件或文件夹。
+
+    os.startfile 只有 Windows 有，macOS 要用 open、Linux 用 xdg-open。
+    """
+    target = str(path)
+    if sys.platform == "win32":
+        os.startfile(target)  # noqa: S606
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", target])
+    else:
+        subprocess.Popen(["xdg-open", target])
 
 
 class AwardStudio(ctk.CTk):
@@ -2176,7 +2191,7 @@ class AwardStudio(ctk.CTk):
             messagebox.showinfo("暂无输出", "还没有生成过奖状，先选择文件并生成吧。")
             return
         try:
-            os.startfile(str(target))  # noqa: S606
+            open_path(target)
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("打不开文件夹", str(exc))
 
@@ -2191,7 +2206,7 @@ class AwardStudio(ctk.CTk):
         for path in self.generated:
             if name in path.name:
                 try:
-                    os.startfile(str(path))  # noqa: S606
+                    open_path(path)
                 except Exception as exc:  # noqa: BLE001
                     messagebox.showerror("打不开文件", str(exc))
                 return
