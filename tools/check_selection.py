@@ -100,11 +100,23 @@ def main() -> int:
         awards = [e for e in window.entries if e.is_winner]
         check(len(awards) <= 3, f"获奖人数不超过选中的 3 人（{len(awards)}）")
 
-        # 4) 取消筛选恢复全员
+        # 4) 表头「全选 / 取消」来回切换
         window._toggle_all()
         ranks = [entry.rank for entry in window.entries]
-        check(not window.filter_on, "再次点表头「选」取消筛选")
+        check(not window.filter_on, "点表头「全选」后恢复全员参与")
         check(ranks[0] == 1 and any(rank == 0 for rank in ranks), "恢复全员排名（缺分数的仍排末尾）")
+        check(window.tree.heading("pick")["text"] == "取消", "全员时表头显示「取消」")
+
+        window._toggle_all()
+        window.update_idletasks()
+        check(window.filter_on and not window.picked, "再点表头「取消」后一个人都不参与")
+        check(window.tree.heading("pick")["text"] == "全选", "无人参与时表头显示「全选」")
+        check(all(entry.rank == 0 for entry in window.entries), "没人参与时全部没有名次")
+        check(str(window.generate_btn.cget("state")) == "disabled", "没人参与时生成按钮不可用")
+
+        window._toggle_all()
+        window.update_idletasks()
+        check(window._all_picked() and window.entries[0].rank == 1, "再点「全选」恢复排名")
     finally:
         window.destroy()
 

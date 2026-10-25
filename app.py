@@ -1944,6 +1944,7 @@ class AwardStudio(ctk.CTk):
         self.tree.tag_configure("picked", background="#EDF1FF")
         self.tree.tag_configure("unpicked", foreground="#B7BECD")
         self.tree.bind("<Double-1>", self._open_certificate)
+        self._update_pick_heading()
         self.tree.bind("<Button-1>", self._on_table_press)
         self.tree.bind("<B1-Motion>", self._on_table_drag)
         self.tree.bind("<ButtonRelease-1>", self._on_table_release)
@@ -2052,26 +2053,43 @@ class AwardStudio(ctk.CTk):
             self._refresh_pick_marks()
 
     def _toggle_pick(self, player) -> None:
+        if self._all_picked():
+            # 现在全员都在，点某一行等于把它剔除
+            self.picked = {p.row for p in self.players if p.row != player.row}
+            self.filter_on = True
+            self._after_pick_change()
+            return
         self.filter_on = True
         if player.row in self.picked:
             self.picked.discard(player.row)
         else:
             self.picked.add(player.row)
-        if not self.picked:
-            # 一个都不剩就回到全员参与
-            self.filter_on = False
         self._after_pick_change()
 
+    def _all_picked(self) -> bool:
+        """现在是不是全员都参与排名（没筛选也算全员）。"""
+        if not self.filter_on:
+            return True
+        return bool(self.players) and len(self.picked) >= len(self.players)
+
     def _toggle_all(self) -> None:
-        if self.filter_on:
+        """表头点一下：全选 / 取消全选。"""
+        if self._all_picked():
+            # 取消全选：进入「筛选但一个人都没选」的状态
+            self.filter_on = True
+            self.picked = set()
+        else:
             self.filter_on = False
             self.picked.clear()
-        else:
-            self.filter_on = True
-            self.picked = {p.row for p in self.players}
-            if not self.picked:
-                self.filter_on = False
         self._after_pick_change()
+
+    def _update_pick_heading(self) -> None:
+        if not getattr(self, "tree", None):
+            return
+        try:
+            self.tree.heading("pick", text="取消" if self._all_picked() else "全选")
+        except Exception:  # noqa: BLE001
+            pass
 
     def _refresh_pick_marks(self) -> None:
         """只更新勾选列与高亮，不重排（拖选过程中用）。"""
@@ -2086,6 +2104,7 @@ class AwardStudio(ctk.CTk):
 
     def _after_pick_change(self) -> None:
         self._recalculate(keep_log=True)
+        self._update_pick_heading()
 
     def _update_table_note(self) -> None:
         note = getattr(self, "table_note", None)
@@ -2099,7 +2118,8 @@ class AwardStudio(ctk.CTk):
             return
         parts = [f"排名依据：{'、'.join(self.score_columns)}"]
         if self.filter_on:
-            parts.append(f"仅 {len(self.picked)} 人参与排名")
+            parts.append(f"仅 {len(self.picked)} 人参与排名" if self.picked
+                         else "未选择参与排名的人")
         missing = sum(1 for player in self.players if not player.scored)
         if missing:
             parts.append(f"{missing} 人缺分数，已排在末尾")
@@ -2174,8 +2194,9 @@ class AwardStudio(ctk.CTk):
             self.merge_hint.configure(text=f"仅排名次 · 共 {len(people)} 份奖状")
 
     def _sync_buttons(self) -> None:
+        participants = sum(1 for player in self.players if self._is_picked(player))
         ready = bool(self.excel_path and self.template_path and not self.busy
-                     and self.score_columns)
+                     and self.score_columns and participants)
         self.generate_btn.configure(state="normal" if ready else "disabled",
                                     fg_color=PRIMARY if ready else "#C7CBDA")
 
