@@ -35,7 +35,7 @@ DATA_DIR = Path(sys.executable).parent if getattr(sys, "frozen", False) else BAS
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
-APP_VERSION = "1.2.2"
+APP_VERSION = "1.3.0"
 
 from core.certificate import (  # noqa: E402
     CertificateContext,
@@ -49,6 +49,7 @@ from core import fields as field_rules  # noqa: E402
 from core import settings as prefs  # noqa: E402
 from core.excel_reader import ExcelParseError, list_sheets, load_players  # noqa: E402
 from core.ranking import (  # noqa: E402
+    RankedEntry,
     award_conflicts,
     certificate_total,
     expand_entries,
@@ -265,6 +266,11 @@ class AwardStudio(ctk.CTk):
         self.excel_title = ""
         self.sheet_names: list[str] = []
         self.sheet_subtitle = ""
+        # 只对部分人排名：picked 存 Excel 行号，filter_on 为 False 时表示全员参与
+        self.picked: set[int] = set()
+        self.filter_on = False
+        self._drag_anchor: int | None = None
+        self._dragging = False
         self.current_sheet = ""
         self._last_sheet_error = ""
         self.ui_queue: queue.Queue = queue.Queue()
@@ -1141,6 +1147,8 @@ class AwardStudio(ctk.CTk):
             return False
 
         self.players = players
+        self.picked.clear()
+        self.filter_on = False
         self.current_sheet = sheet
         self.excel_title = report.title
         self.sheet_subtitle = report.subtitle
@@ -1730,12 +1738,16 @@ class AwardStudio(ctk.CTk):
         else:
             quota = sum(count for _name, count in tiers) if tiers else self.winners
             self.quota = quota
+            chosen = [p for p in self.players if self._is_picked(p)]
+            rest = [p for p in self.players if not self._is_picked(p)]
             self.entries = rank_players(
-                self.players,
+                chosen,
                 winners=quota,
                 use_tiers=bool(tiers),
                 award_tiers=tiers,
             )
+            # 没被选中的人排到最后，不参与排名
+            self.entries += [RankedEntry(rank=0, player=p, award="") for p in rest]
         self._refresh_table()
         self._refresh_stats()
         self._update_table_note()
@@ -1781,6 +1793,10 @@ class AwardStudio(ctk.CTk):
             seen = True
         return seen
 
+    def _is_picked(self, player) -> bool:
+        """这个人是否参与排名；没有做筛选时全员参与。"""
+        return not self.filter_on or player.row in self.picked
+
     def _apply_score_columns(self) -> None:
         """按勾选的列重算每个人的排名分；多列时同时算出合计与平均。"""
         if not self.players:
@@ -1791,11 +1807,19 @@ class AwardStudio(ctk.CTk):
                 player.score = player.raw_score
                 player.total = player.raw_score
                 player.average = player.raw_score
+                player.scored = player.raw_scored
                 continue
-            numbers = [self._numeric_value(player, key) for key in columns]
-            player.total = sum(numbers)
-            player.average = player.total / len(numbers)
-            player.score = numbers[0] if len(numbers) == 1 else player.total
+            numbers = []
+            for key in columns:
+                if key == "分数":
+                    numbers.append(player.raw_score if player.raw_scored else None)
+                else:
+                    numbers.append(self._to_number(player.fields.get(key, "")))
+            valid = [n for n in numbers if n is not None]
+            player.scored = bool(valid)
+            player.total = sum(valid)
+            player.average = player.total / len(valid) if valid else 0.0
+            player.score = valid[0] if len(valid) == 1 else player.total
 
     def _on_heading_click(self, key: str) -> None:
         if key in ("rank", "award", "total", "avg"):
@@ -1837,7 +1861,7 @@ class AwardStudio(ctk.CTk):
 
     def _table_column_specs(self) -> list[tuple]:
         """列由成绩表的实际字段决定：名次 + 原始各列 + 总分 + 奖项。"""
-        specs: list[tuple] = [("rank", "名次", 84, "center")]
+        specs: list[tuple] = [("pick", "选", 46, "center"), ("rank", "名次", 84, "center")]
         if self.players:
             multi = len(self.score_columns) > 1
             for key in self.players[0].fields:
@@ -1884,10 +1908,13 @@ class AwardStudio(ctk.CTk):
         self._table_columns = self._table_column_specs()
         keys = [spec[0] for spec in self._table_columns]
         self.tree = ttk.Treeview(holder, columns=keys, show="headings", height=6,
-                                 style="Award.Treeview", selectmode="browse")
+                                 style="Award.Treeview", selectmode="none")
         for key, text, width, anchor in self._table_columns:
             label = self._heading_label(key, text)
-            if key in ("rank", "award", "total", "avg"):
+            if key == "pick":
+                self.tree.heading(key, text=label, anchor=anchor,
+                                  command=self._toggle_all)
+            elif key in ("rank", "award", "total", "avg"):
                 self.tree.heading(key, text=label, anchor=anchor)
             else:
                 self.tree.heading(key, text=label, anchor=anchor,
@@ -1914,7 +1941,12 @@ class AwardStudio(ctk.CTk):
         self.tree.tag_configure("third", background="#FDF2EC", foreground="#8A4A1F")
         self.tree.tag_configure("winner", background="#F7F5FF", foreground="#312E81")
         self.tree.tag_configure("normal", background=CARD, foreground=MUTED)
+        self.tree.tag_configure("picked", background="#EDF1FF")
+        self.tree.tag_configure("unpicked", foreground="#B7BECD")
         self.tree.bind("<Double-1>", self._open_certificate)
+        self.tree.bind("<Button-1>", self._on_table_press)
+        self.tree.bind("<B1-Motion>", self._on_table_drag)
+        self.tree.bind("<ButtonRelease-1>", self._on_table_release)
         self._fit_columns()
         self.after(40, self._fit_columns)
 
@@ -1943,14 +1975,15 @@ class AwardStudio(ctk.CTk):
         for index, entry in enumerate(self.entries):
             fields = entry.player.fields
             award_text = (entry.award or "—") if entry.is_winner else "—"
-            values = [entry.rank if entry.rank else "—"]
-            for key, _text, _width, _anchor in self._table_columns[1:-1]:
+            picked = self._is_picked(entry.player)
+            values = ["☑" if picked else "☐", entry.rank if entry.rank else "—"]
+            for key, _text, _width, _anchor in self._table_columns[2:-1]:
                 if key == "分数":
-                    values.append(f"{entry.player.score:g}")
+                    values.append(f"{entry.player.score:g}" if entry.player.scored else "—")
                 elif key == "total":
-                    values.append(f"{entry.player.total:g}")
+                    values.append(f"{entry.player.total:g}" if entry.player.scored else "—")
                 elif key == "avg":
-                    values.append(f"{entry.player.average:.1f}")
+                    values.append(f"{entry.player.average:.1f}" if entry.player.scored else "—")
                 else:
                     values.append(fields.get(key, "") or "—")
             values.append(award_text)
@@ -1964,19 +1997,114 @@ class AwardStudio(ctk.CTk):
                 tag = "winner"
             else:
                 tag = "normal"
-            self.tree.insert("", "end", values=values, tags=(tag,))
+            tags = (tag,) if picked else ("unpicked", tag)
+            self.tree.insert("", "end", values=values, tags=tags)
+
+    # -------------------------------------------------------------- 选人
+    def _player_at(self, index: int):
+        if 0 <= index < len(self.entries):
+            return self.entries[index].player
+        return None
+
+    def _on_table_press(self, event):
+        if self.tree.identify_region(event.x, event.y) != "cell":
+            return None
+        row_id = self.tree.identify_row(event.y)
+        if not row_id:
+            return None
+        player = self._player_at(self.tree.index(row_id))
+        if player is None:
+            return None
+        if self.tree.identify_column(event.x) == "#1":
+            self._toggle_pick(player)
+            return None
+        # 在其它列按下并拖动 = 框选一段人（只按下不动不算，避免误点清空选择）
+        self._drag_anchor = self.tree.index(row_id)
+        self._dragging = True
+        return None
+
+    def _on_table_drag(self, event):
+        if not self._dragging or self._drag_anchor is None:
+            return None
+        row_id = self.tree.identify_row(max(event.y, 1))
+        if not row_id:
+            return None
+        self._select_range(self._drag_anchor, self.tree.index(row_id))
+        return None
+
+    def _on_table_release(self, event=None):
+        if self._dragging:
+            self._dragging = False
+            self._drag_anchor = None
+            self._after_pick_change()
+        return None
+
+    def _select_range(self, start: int, end: int) -> None:
+        low, high = sorted((start, end))
+        rows = set()
+        for index in range(low, high + 1):
+            player = self._player_at(index)
+            if player is not None:
+                rows.add(player.row)
+        if rows:
+            self.filter_on = True
+            self.picked = rows
+            self._refresh_pick_marks()
+
+    def _toggle_pick(self, player) -> None:
+        self.filter_on = True
+        if player.row in self.picked:
+            self.picked.discard(player.row)
+        else:
+            self.picked.add(player.row)
+        if not self.picked:
+            # 一个都不剩就回到全员参与
+            self.filter_on = False
+        self._after_pick_change()
+
+    def _toggle_all(self) -> None:
+        if self.filter_on:
+            self.filter_on = False
+            self.picked.clear()
+        else:
+            self.filter_on = True
+            self.picked = {p.row for p in self.players}
+            if not self.picked:
+                self.filter_on = False
+        self._after_pick_change()
+
+    def _refresh_pick_marks(self) -> None:
+        """只更新勾选列与高亮，不重排（拖选过程中用）。"""
+        for index, item in enumerate(self.tree.get_children()):
+            player = self._player_at(index)
+            picked = bool(player) and self._is_picked(player)
+            self.tree.set(item, "pick", "☑" if picked else "☐")
+            tags = [tag for tag in self.tree.item(item, "tags") if tag != "picked"]
+            if picked:
+                tags.insert(0, "picked")
+            self.tree.item(item, tags=tuple(tags))
+
+    def _after_pick_change(self) -> None:
+        self._recalculate(keep_log=True)
 
     def _update_table_note(self) -> None:
         note = getattr(self, "table_note", None)
         if note is None:
             return
         if not self.players:
-            note.configure(text="同分并列名次 · 前三名高亮")
-        elif not self.score_columns:
-            note.configure(text="未选评判列 · 按原始顺序 · 点表头数字列勾选")
-        else:
-            names = "、".join(self.score_columns)
-            note.configure(text=f"排名依据：{names}")
+            note.configure(text="同分并列名次 · 前三名高亮", text_color=MUTED)
+            return
+        if not self.score_columns:
+            note.configure(text="未选评判列 · 按原始顺序 · 点表头数字列勾选", text_color=MUTED)
+            return
+        parts = [f"排名依据：{'、'.join(self.score_columns)}"]
+        if self.filter_on:
+            parts.append(f"仅 {len(self.picked)} 人参与排名")
+        missing = sum(1 for player in self.players if not player.scored)
+        if missing:
+            parts.append(f"{missing} 人缺分数，已排在末尾")
+        note.configure(text=" · ".join(parts),
+                       text_color=WARNING if missing else MUTED)
 
     def _update_award_warning(self) -> None:
         """同分并列导致实际发奖人数与设置不一致时提醒用户改人数。"""
@@ -2018,12 +2146,12 @@ class AwardStudio(ctk.CTk):
             for label in self.stat_values.values():
                 label.configure(text="—")
             return
-        scores = [p.score for p in self.players]
+        scores = [p.score for p in self.players if p.scored]
         winners = winners_of(self.entries)
         people = expand_entries(winners)
         self.stat_values["total"].configure(text=str(len(self.players)))
-        if not self.score_columns:
-            # 没有选择评判列就不做分数统计，避免暗示已经排过序
+        if not self.score_columns or not scores:
+            # 没有选择评判列（或一个人都没分）就不做分数统计
             self.stat_values["max"].configure(text="—")
             self.stat_values["avg"].configure(text="—")
         else:
@@ -2202,7 +2330,8 @@ class AwardStudio(ctk.CTk):
         values = self.tree.item(row, "values")
         if not values or not self.generated:
             return
-        name = values[1]
+        keys = [spec[0] for spec in self._table_columns]
+        name = values[keys.index("姓名")] if "姓名" in keys else values[1]
         for path in self.generated:
             if name in path.name:
                 try:
@@ -2250,6 +2379,9 @@ class AwardStudio(ctk.CTk):
             "只勾一列就按那一列排序；勾多列会自动算出「合计」和「平均」并按合计排名。\n"
             "· 一列都没勾时程序完全不排序：名次、奖项都显示「—」，行顺序就是 Excel 里的原始顺序，"
             "生成按钮也是灰的。再点一次表头可以取消勾选、回到原始顺序。\n"
+            "· 分数没填完也能打开：只要有姓名列就能加载；勾选排名依据后，缺分的人排在末尾、"
+            "名次显示「—」、不参与发奖，标题旁会提示有几人缺分数。\n"
+            "· 只想给一部分人排名：在排名表第一列勾选，或按住左键拖出一段；表头「选」点一下全选/取消。\n"
             "· 集体项目：一行代表一支队，「参赛选手」按空格拆开，每人一份奖状，"
             "{{代表队}} 填队名；同队的名次奖项一致。\n"
             "· 模板里可写 {{项目组}}（第几组/场地组）、{{参赛项目}}、{{代表队}}，会自动从成绩表取；"

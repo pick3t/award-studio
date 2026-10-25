@@ -81,14 +81,17 @@ def rank_players(
 ) -> list[RankedEntry]:
     """按分数降序排名，同分并列（1、2、2、4）。
 
-    award_tiers 为自定义奖项（名称 + 人数），按排序位置依次分配；
-    传 None 时沿用三等分；use_tiers=False 时只排名次、不留奖项。
+    没有分数的选手不参与排名：排在有分数的人后面，名次显示为「—」，
+    也不会拿到奖项。award_tiers 为自定义奖项（名称 + 人数），按排序
+    位置依次分配；传 None 时沿用三等分；use_tiers=False 时只排名次。
     ranked=False 时不排序、不分奖，按表格原始行顺序返回。
     """
     if not ranked:
         return [RankedEntry(rank=0, player=p, award="", is_winner=False) for p in players]
 
-    ordered = sorted(players, key=lambda p: (-p.score, p.name))
+    scored = [p for p in players if p.scored]
+    unscored = [p for p in players if not p.scored]
+    ordered = sorted(scored, key=lambda p: (-p.score, p.name))
     slots = build_slots(winners, use_tiers, award_tiers)
     quota = len(slots) if slots else max(0, winners)
 
@@ -118,6 +121,9 @@ def rank_players(
             entries[position].award = award
             entries[position].is_winner = in_quota
         index = end
+
+    # 没有分数的排在最后，不参与排名、不发奖
+    entries.extend(RankedEntry(rank=0, player=p, award="", is_winner=False) for p in unscored)
     return entries
 
 

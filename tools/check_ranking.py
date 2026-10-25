@@ -54,11 +54,12 @@ def run(window, filename: str, numeric_key: str | None) -> None:
 
     cols = [spec[1] for spec in window._table_columns]
     labels = set(window.column_names) | set(window.score_column_names)
-    stray = [c for c in cols if c not in labels and c not in ("名次", "奖项")]
+    stray = [c for c in cols if c not in labels and c not in ("选", "名次", "奖项")]
     check(window.score_columns == [], f"载入后没有任何默认评判列（{window.score_columns}）")
     check(not stray, f"列全部来自成绩表，没有计算列：{cols}")
     rows = cells(window.tree)
-    check(all(row[0] == "—" for row in rows), "名次列全部为「—」")
+    rank_idx = cols.index("名次")
+    check(all(row[rank_idx] == "—" for row in rows), "名次列全部为「—」")
     check([row[cols.index("姓名")] for row in rows] == order, "行顺序 = Excel 原始行顺序")
     stats = [label.cget("text") for label in window.stat_values.values()]
     check(stats[1] == "—" and stats[2] == "—" and stats[3] == "—", f"统计区不显示分数/奖项：{stats}")
@@ -71,7 +72,7 @@ def run(window, filename: str, numeric_key: str | None) -> None:
         window._on_heading_click(numeric_key)
         window.update_idletasks()
         ranked = cells(window.tree)
-        ranks = [row[0] for row in ranked]
+        ranks = [row[cols.index("名次")] for row in ranked]
         check(window.score_columns == [numeric_key], f"勾选「{numeric_key}」后作为唯一评判列")
         check(ranks[0] == "1", f"勾选后开始排名（首行名次 {ranks[0]}）")
         check(any(r != "—" for r in ranks), "勾选后名次列有实际名次")
@@ -82,7 +83,8 @@ def run(window, filename: str, numeric_key: str | None) -> None:
         window.update_idletasks()
         back = cells(window.tree)
         check(window.score_columns == [], "再次点击可取消勾选")
-        check(all(row[0] == "—" for row in back), "取消勾选后名次恢复为「—」")
+        check(all(row[cols.index("名次")] == "—" for row in back),
+              "取消勾选后名次恢复为「—」")
         check([row[cols.index("姓名")] for row in back] == order, "取消勾选后回到 Excel 原始顺序")
 
 

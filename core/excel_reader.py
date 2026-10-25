@@ -71,6 +71,10 @@ class Player:
     # 用户勾选多列排名时，这里放合计与平均
     total: float = 0.0
     average: float = 0.0
+    # 排名依据列上有没有值；没有的话排名时排到末尾
+    scored: bool = True
+    # 原始成绩表里这一行有没有分数（用「分数」列排名时以此为准）
+    raw_scored: bool = True
 
     def __post_init__(self) -> None:
         if not self.raw_score:
@@ -182,8 +186,8 @@ def _detect_header(rows: list[tuple[int, list[Any]]]) -> int | None:
                 ("no", NO_ALIASES),
             ):
                 scores[role] = max(scores[role], _role_score(value, aliases))
-        # 姓名列和分数列必须同时出现，否则不认为是表头
-        if scores["name"] < 60 or scores["score"] < 60:
+        # 有姓名列就算表头；分数列可以没有（还没录分数的成绩表也要能打开）
+        if scores["name"] < 60:
             continue
         total = scores["name"] + scores["score"] + scores["no"] * 0.5
         if total > best_total:
@@ -207,18 +211,37 @@ def _row_score(values: list[Any], role: str) -> int:
     return best
 
 
+def _merge_header_rows(values: list[Any], nxt: list[Any]) -> list[str]:
+    """把相邻两行表头拼成一行（「最后」+「得分」→「最后得分」）。"""
+    merged: list[str] = []
+    for i in range(max(len(values), len(nxt))):
+        head = _header_text(values[i]) if i < len(values) else ""
+        tail = _header_text(nxt[i]) if i < len(nxt) else ""
+        merged.append(f"{head}{tail}".strip())
+    return merged
+
+
 def _resolve_header(rows: list[tuple[int, list[Any]]],
                     raw_rows: dict[int, list[Any]]) -> tuple[int | None, list[str], int]:
     """定位表头，返回 (表头行, 表头文字, 数据起始行)。
 
-    兼容「最后」在第 3 行、「得分」在第 4 行的竖向合并表头。
+    有姓名列就算表头；分数列可以没有。表头竖着拆成两行
+    （第 3 行「最后」+ 第 4 行「得分」）时会自动拼起来。
     """
     header_row = _detect_header(rows)
     if header_row is not None:
-        return header_row, [_header_text(v) for v in raw_rows[header_row]], header_row + 1
+        headers = [_header_text(v) for v in raw_rows[header_row]]
+        if _map_columns(headers)["score"]:
+            return header_row, headers, header_row + 1
+        # 这一行有姓名但没分数列，看看是不是分数表头写在了下一行
+        nxt = raw_rows.get(header_row + 1)
+        if nxt and not any(isinstance(v, (int, float)) for v in nxt):
+            merged = _merge_header_rows(raw_rows[header_row], nxt)
+            if _map_columns(merged)["score"]:
+                return header_row, merged, header_row + 2
+        return header_row, headers, header_row + 1
 
     for row_no, values in rows:
-        # 这一行有姓名但找不到分数列，下一行又没有姓名/数字，就把两行拼起来再试
         if _row_score(values, "name") < 60 or _row_score(values, "score") >= 60:
             continue
         nxt = raw_rows.get(row_no + 1)
@@ -226,11 +249,7 @@ def _resolve_header(rows: list[tuple[int, list[Any]]],
             continue
         if any(isinstance(v, (int, float)) for v in nxt):
             continue
-        merged = []
-        for i in range(max(len(values), len(nxt))):
-            head = _header_text(values[i]) if i < len(values) else ""
-            tail = _header_text(nxt[i]) if i < len(nxt) else ""
-            merged.append(f"{head}{tail}".strip())
+        merged = _merge_header_rows(values, nxt)
         if _row_score(merged, "score") >= 60:
             return row_no, merged, row_no + 2
     return None, [], 0
@@ -387,9 +406,9 @@ def load_players(path: str | Path, sheet_name: str | None = None) -> tuple[list[
         )
 
     columns = _map_columns(headers)
-    if not columns["name"] or not columns["score"]:
+    if not columns["name"]:
         workbook.close()
-        raise ExcelParseError("识别到表头，但姓名列或分数列定位失败")
+        raise ExcelParseError("识别到表头，但找不到姓名列")
 
     name_col = columns["name"][0]
     no_col = columns["no"][0] if columns["no"] else None
@@ -405,6 +424,7 @@ def load_players(path: str | Path, sheet_name: str | None = None) -> tuple[list[
 
     players: list[Player] = []
     warnings: list[str] = []
+    missing: list[str] = []
     header_texts = {_norm(headers[i]) for i in range(len(headers))}
 
     for row_no in range(data_start, worksheet.max_row + 1):
@@ -418,9 +438,6 @@ def load_players(path: str | Path, sheet_name: str | None = None) -> tuple[list[
 
         scores = [parse_score(values[i]) for i in score_cols if i < len(values)]
         valid = [s for s in scores if s is not None]
-        if not valid:
-            warnings.append(f"第 {row_no} 行「{name}」分数无效，已跳过")
-            continue
         total = float(sum(valid))
         if len(valid) > 1:
             total = round(total, 4)
@@ -442,15 +459,24 @@ def load_players(path: str | Path, sheet_name: str | None = None) -> tuple[list[
                 if text and label not in extras:
                     extras[label] = text
 
+        if score_cols and not valid:
+            missing.append(name)
         players.append(
             Player(
                 name=name,
                 score=total,
+                scored=bool(valid) if score_cols else True,
+                raw_scored=bool(valid) if score_cols else True,
                 no=_cell_text(values[no_col]) if no_col is not None and no_col < len(values) else "",
                 extras=extras,
                 row=row_no,
             )
         )
+
+    if missing:
+        shown = "、".join(missing[:5])
+        more = f" 等 {len(missing)} 人" if len(missing) > 5 else ""
+        warnings.append(f"{shown}{more} 没有分数，排名时会排在末尾")
 
     report = ParseReport(
         path=str(file_path),
