@@ -858,11 +858,20 @@ class AwardStudio(ctk.CTk):
             font=self.font_small, text_color=MUTED, anchor="w",
             justify="left", wraplength=286,
         )
+        mapping_footer = ctk.CTkFrame(self.mapping_section, fg_color="transparent")
+        mapping_footer.pack(fill="x")
         self.mapping_toggle = ctk.CTkButton(
-            self.mapping_section, text="收起映射", height=22, fg_color="transparent",
+            mapping_footer, text="收起映射", height=22, fg_color="transparent",
             hover_color="#F1F4FA", text_color=MUTED, font=self.font_small,
-            anchor="w", command=self._toggle_mappings,
+            anchor="w", command=self._toggle_mappings, width=90,
         )
+        self.mapping_toggle.pack(side="left")
+        self.mapping_reset = ctk.CTkButton(
+            mapping_footer, text="重置映射", height=22, fg_color="transparent",
+            hover_color="#F1F4FA", text_color=MUTED, font=self.font_small,
+            anchor="e", width=80, command=self._reset_mappings,
+        )
+        self.mapping_reset.pack(side="right")
         self.mapping_open = False
 
         # ④ 奖项
@@ -1410,6 +1419,28 @@ class AwardStudio(ctk.CTk):
         if not getattr(self, "mapping_open", True):
             self.mapping_toggle.configure(text=f"展开映射（{len(self.field_rules)} 个字段）")
 
+    def _reset_mappings(self) -> None:
+        """把所有占位符的取值方式恢复成默认（自动 = 同名内置字段）。"""
+        if not self.field_rules:
+            return
+        for rule in self.field_rules:
+            rule.source = "auto"
+            rule.value = ""
+        self._render_mappings()
+        self._save_settings()
+        self._log("字段映射已重置为默认", "info")
+
+    def _warn_empty_mapping(self, winners, rules) -> None:
+        """生成后检查：某个占位符所有获奖者都算不出值，提醒用户去改映射。"""
+        if not winners or not rules:
+            return
+        context = CertificateContext(contest="", issuer="", date="")
+        for rule in rules:
+            values = [str(field_rules.resolve(rule, entry, context) or "").strip()
+                      for entry in winners[:20]]
+            if values and not any(values):
+                self._log(f"「{rule.key}」在所有奖状里都是空的，请检查字段映射", "warn")
+
     def _render_mappings(self) -> None:
         for child in self.mapping_box.winfo_children():
             child.destroy()
@@ -1420,8 +1451,11 @@ class AwardStudio(ctk.CTk):
             row = ctk.CTkFrame(self.mapping_box, fg_color="transparent")
             row.pack(fill="x", pady=1)
 
+            # 改过内置字段的（比如名次中文 → 奖项）用橙色标出来，避免以为自己还是默认
+            changed = bool((rule.value or "").strip()) and rule.value.strip() != rule.key
             ctk.CTkLabel(row, text=rule.key, width=self._px(52), anchor="w",
-                         font=self.font_small, text_color=INK).pack(side="left")
+                         font=self.font_small,
+                         text_color=WARNING if changed else INK).pack(side="left")
             menu = ctk.CTkOptionMenu(
                 row, values=list(field_rules.SOURCE_LABELS.values()),
                 width=self._px(76), height=self._px(26), font=self.font_small,
@@ -2253,6 +2287,7 @@ class AwardStudio(ctk.CTk):
             date=date.today().strftime("%Y 年 %m 月 %d 日"),
             extra={"项目组": self.sheet_subtitle} if self.sheet_subtitle else {},
         )
+        self._warn_empty_mapping(winners, self.field_rules)
         self.busy = True
         self.generate_btn.configure(state="disabled", text="正在生成…", fg_color="#9CA3AF")
         self.status_label.configure(text=f"正在生成 {total_certificates} 份奖状…", text_color=PRIMARY)
