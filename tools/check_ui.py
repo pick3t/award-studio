@@ -145,7 +145,10 @@ def main() -> int:
 
         window._on_sheet_change("一场地1组")
         window.update_idletasks()
-        check([c[1] for c in window._table_columns][2] == "姓名", "切回个人表恢复「姓名」表头")
+        columns = [c[1] for c in window._table_columns]
+        check(columns[2] == "姓名", "切回个人表恢复「姓名」表头")
+        check("序号" in columns and "编号" not in columns,
+              f"编号列按原表头显示成「序号」：{columns}")
     finally:
         window.destroy()
 

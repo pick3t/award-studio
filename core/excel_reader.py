@@ -102,16 +102,19 @@ class ParseReport:
     total_rows: int = 0
     title: str = ""
     name_header: str = "姓名"   # 名称列在表里的原始表头（集体表是「代表队」）
+    no_header: str = ""         # 编号列在表里的原始表头（序号 / 编号 / 学号…）
     subtitle: str = ""      # 表头上方第二行，通常是「项目X：… 第N组」
 
     def describe(self) -> str:
+        """一句话说明认到了哪几列，例如：名称列「代表队」· 编号列「序号」· 分数列「成绩」。"""
+        labels = {"name": "名称列", "no": "编号列", "score": "分数列"}
         parts = []
         for role in ("name", "no", "score"):
             idx = self.columns.get(role)
             if idx:
                 names = "、".join(self.headers[i] for i in idx if i < len(self.headers))
-                parts.append(f"{ROLE_LABELS[role]}：{names}")
-        return " | ".join(parts)
+                parts.append(f"{labels[role]}「{names}」")
+        return " · ".join(parts)
 
 
 # ---------------------------------------------------------------- 工具函数
@@ -492,6 +495,7 @@ def load_players(path: str | Path, sheet_name: str | None = None) -> tuple[list[
         columns=columns,
         total_rows=len(players),
         name_header=(headers[name_col] if name_col < len(headers) else "姓名") or "姓名",
+        no_header=(headers[no_col] if no_col is not None and no_col < len(headers) else ""),
         title=_detect_title(rows, header_row),
         subtitle=_detect_subtitle(rows, header_row),
     )

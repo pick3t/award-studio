@@ -267,6 +267,7 @@ class AwardStudio(ctk.CTk):
         self.sheet_names: list[str] = []
         self.sheet_subtitle = ""
         self.name_header = "姓名"
+        self.no_header = ""
         # 只对部分人排名：picked 存 Excel 行号，filter_on 为 False 时表示全员参与
         self.picked: set[int] = set()
         self.filter_on = False
@@ -1171,6 +1172,7 @@ class AwardStudio(ctk.CTk):
         self.excel_title = report.title
         self.sheet_subtitle = report.subtitle
         self.name_header = getattr(report, "name_header", "姓名") or "姓名"
+        self.no_header = getattr(report, "no_header", "") or ""
         self.column_names = list(players[0].fields.keys()) if players else []
         score_idx = report.columns.get("score", [])
         self.score_column_names = [report.headers[i] for i in score_idx
@@ -1402,6 +1404,16 @@ class AwardStudio(ctk.CTk):
             self.mapping_toggle.configure(
                 text=f"展开映射（{len(self.field_rules)} 个字段）")
 
+    def _column_label(self, key: str) -> str:
+        """界面上显示这一列时用的名字：尽量用成绩表里的原始表头。"""
+        if key == "姓名":
+            return self.name_header or "姓名"
+        if key == "编号":
+            return self.no_header or "编号"
+        if key == "分数" and len(self.score_column_names) == 1:
+            return self.score_column_names[0]
+        return key
+
     def _column_names(self) -> list[str]:
         """可映射的列：成绩表的真实列 + 工作表标题里的「项目组」。"""
         columns = list(self.players[0].fields.keys()) if self.players else list(self.column_names)
@@ -1491,16 +1503,22 @@ class AwardStudio(ctk.CTk):
             return
 
         if rule.source == "column":
-            names = self._column_names() or ["（先选择成绩表）"]
+            names = self._column_names()
+            if not names:
+                ctk.CTkLabel(holder, text="（先选择成绩表）", font=self.font_small,
+                             text_color=MUTED, anchor="w", height=height).pack(fill="x")
+                return
+            labels = [self._column_label(name) for name in names]
+            if rule.value not in names:
+                rule.value = field_rules.column_for(rule.key, names) or names[0]
             menu = ctk.CTkOptionMenu(
-                holder, values=names, font=self.font_small, dropdown_font=self.font_small,
+                holder, values=labels, font=self.font_small, dropdown_font=self.font_small,
                 height=height, corner_radius=7, fg_color="#F8FAFD",
                 button_color="#E8ECF5", button_hover_color="#DDE3EF", text_color=INK,
-                command=lambda value, r=rule: self._set_rule_value(r, value),
+                command=lambda label, r=rule, ns=names, ls=labels: self._set_rule_value(
+                    r, ns[ls.index(label)]),
             )
-            if rule.value not in names:
-                rule.value = field_rules.column_for(rule.key, names) or (names[0] if names else "")
-            menu.set(rule.value)
+            menu.set(self._column_label(rule.value))
             menu.pack(fill="x")
             return
 
@@ -1941,7 +1959,7 @@ class AwardStudio(ctk.CTk):
                 # 整列都没有值的（比如表里没有编号）就不显示
                 if key != "姓名" and not self._column_has_values(key):
                     continue
-                label = self.name_header if key == "姓名" else key
+                label = self._column_label(key)
                 width = {"姓名": 118, "编号": 104}.get(key, 130)
                 if key.startswith("评委"):
                     width = 118
