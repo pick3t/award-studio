@@ -266,6 +266,7 @@ class AwardStudio(ctk.CTk):
         self.excel_title = ""
         self.sheet_names: list[str] = []
         self.sheet_subtitle = ""
+        self.name_header = "姓名"
         # 只对部分人排名：picked 存 Excel 行号，filter_on 为 False 时表示全员参与
         self.picked: set[int] = set()
         self.filter_on = False
@@ -1169,6 +1170,7 @@ class AwardStudio(ctk.CTk):
         self.current_sheet = sheet
         self.excel_title = report.title
         self.sheet_subtitle = report.subtitle
+        self.name_header = getattr(report, "name_header", "姓名") or "姓名"
         self.column_names = list(players[0].fields.keys()) if players else []
         score_idx = report.columns.get("score", [])
         self.score_column_names = [report.headers[i] for i in score_idx
@@ -1497,7 +1499,7 @@ class AwardStudio(ctk.CTk):
                 command=lambda value, r=rule: self._set_rule_value(r, value),
             )
             if rule.value not in names:
-                rule.value = names[0]
+                rule.value = field_rules.column_for(rule.key, names) or (names[0] if names else "")
             menu.set(rule.value)
             menu.pack(fill="x")
             return
@@ -1933,14 +1935,18 @@ class AwardStudio(ctk.CTk):
                         specs.append(("分数", original, 112, "center"))
                     # 多评委合并出来的综合分不主动展示，用户勾选后才出现
                     continue
+                # 名称列表头（集体表是「代表队」）已经用名称列显示了，别再重复一列
+                if key != "姓名" and key == self.name_header:
+                    continue
                 # 整列都没有值的（比如表里没有编号）就不显示
                 if key != "姓名" and not self._column_has_values(key):
                     continue
-                width = {"姓名": 110, "编号": 104}.get(key, 130)
+                label = self.name_header if key == "姓名" else key
+                width = {"姓名": 118, "编号": 104}.get(key, 130)
                 if key.startswith("评委"):
                     width = 118
                 anchor = "center" if key in ("编号",) or key.startswith("评委") else "w"
-                specs.append((key, key, width, anchor))
+                specs.append((key, label, width, anchor))
         else:
             specs += [("name", "姓名", 110, "w"), ("no", "编号", 90, "center"),
                       ("score", "总分", 84, "center")]

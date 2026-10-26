@@ -148,8 +148,17 @@ def build_rules(keys: list[str], columns: list[str] | None = None,
         if rule.source == "auto":  # 旧版本遗留
             rules.append(_migrate_auto(key, rule.value, columns))
             continue
-        if rule.source == "column" and not rule.value.strip():
-            rule.value = column_for(key, columns) or ""
+        if rule.source == "column":
+            # 换了工作表后原来的列名可能不存在了，按新表重新对号
+            if columns and rule.value.strip() not in columns:
+                hit = column_for(key, columns)
+                if hit:
+                    rule.value = hit
+                else:
+                    fresh = default_rule(key, columns, context)
+                    rule.source, rule.value = fresh.source, fresh.value
+            elif not rule.value.strip():
+                rule.value = column_for(key, columns) or ""
         rules.append(rule)
     return rules
 

@@ -101,6 +101,7 @@ class ParseReport:
     columns: dict[str, list[int]] = field(default_factory=dict)
     total_rows: int = 0
     title: str = ""
+    name_header: str = "姓名"   # 名称列在表里的原始表头（集体表是「代表队」）
     subtitle: str = ""      # 表头上方第二行，通常是「项目X：… 第N组」
 
     def describe(self) -> str:
@@ -461,6 +462,11 @@ def load_players(path: str | Path, sheet_name: str | None = None) -> tuple[list[
 
         if score_cols and not valid:
             missing.append(name)
+        # 名称列的表头本身也是一列（集体表叫「代表队」），保留下来供字段映射选择
+        name_header = headers[name_col] if name_col < len(headers) else "姓名"
+        if name_header and name_header != "姓名" and name_header not in extras:
+            extras[name_header] = name
+
         players.append(
             Player(
                 name=name,
@@ -485,6 +491,7 @@ def load_players(path: str | Path, sheet_name: str | None = None) -> tuple[list[
         headers=headers,
         columns=columns,
         total_rows=len(players),
+        name_header=(headers[name_col] if name_col < len(headers) else "姓名") or "姓名",
         title=_detect_title(rows, header_row),
         subtitle=_detect_subtitle(rows, header_row),
     )

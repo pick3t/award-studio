@@ -123,6 +123,29 @@ def main() -> int:
             page_awards = [page[-1] for page in pages]
             check(page_awards == ["金", "银", "银", "铜"],
                   f"合并版四页奖项各不相同：{page_awards}")
+        # 5) 切换工作表后，列、表头、映射都要跟着变
+        print("4) 切换工作表后不残留")
+        window._on_sheet_change("一场地1组集体")
+        window.update_idletasks()
+        columns = [c[1] for c in window._table_columns]
+        check("代表队" in columns, f"集体表出现「代表队」列：{columns}")
+        check(columns.count("代表队") == 1, "「代表队」列没有重复")
+        check(columns[2] == "代表队", f"名称列按原表头显示（{columns[2]}）")
+        options = window._column_names()
+        check("代表队" in options, f"表格列下拉里能看到代表队：{options}")
+        rule = next(r for r in window.field_rules if r.key == "代表队")
+        check(rule.source == "column" and rule.value == "代表队",
+              f"代表队的映射自动指向代表队列：{rule.source}/{rule.value}")
+        rule = next(r for r in window.field_rules if r.key == "组别")
+        check(rule.source == "text",
+              f"新表没有组别列时改成固定值：{rule.source}/{rule.value!r}")
+        row = window.tree.item(window.tree.get_children()[0], "values")
+        check(row[2] == window.entries[0].player.name,
+              f"首行是当前表排名第一的人/队：{row[2]}")
+
+        window._on_sheet_change("一场地1组")
+        window.update_idletasks()
+        check([c[1] for c in window._table_columns][2] == "姓名", "切回个人表恢复「姓名」表头")
     finally:
         window.destroy()
 
