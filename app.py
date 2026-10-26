@@ -14,6 +14,7 @@ import subprocess
 import re
 import sys
 import threading
+import time
 from datetime import date, datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -28,6 +29,13 @@ if sys.platform == "win32":
         pass
 
 import customtkinter as ctk
+
+try:  # 拖放扩展是可选的：装不上就退回「点按钮选文件」
+    from tkinterdnd2.TkinterDnD import DnDWrapper as _DnDWrapper
+except Exception:  # noqa: BLE001
+
+    class _DnDWrapper:  # type: ignore[no-redef]
+        """tkinterdnd2 不可用时的占位混入类。"""
 
 BASE_DIR = Path(__file__).resolve().parent
 # 打包成 exe 后，示例数据放在 exe 同目录
@@ -236,7 +244,13 @@ def open_path(path) -> None:
         subprocess.Popen(["xdg-open", target])
 
 
-class AwardStudio(ctk.CTk):
+class AwardStudio(ctk.CTk, _DnDWrapper):
+    """主窗口。
+
+    必须混入 tkinterdnd2 的 DnDWrapper：tkinterdnd2 只把 drop_target_register /
+    dnd_bind 补丁到 tkinter.BaseWidget，而 CTk 继承的是 Tk（不是 BaseWidget），
+    根窗口本身拿不到这些方法。
+    """
     def __init__(self, demo: bool = False) -> None:
         super().__init__()
         ctk.set_appearance_mode("light")
@@ -373,6 +387,7 @@ class AwardStudio(ctk.CTk):
             ("players", lambda: len(self.players)),
             ("win_icon", lambda: bool(getattr(self, "_icon_photo", None))),
             ("drop", lambda: getattr(self, "drop_backend", "?")),
+            ("drop_note", lambda: getattr(self, "drop_note", "")),
             ("cert_font", lambda: CERT_FONT),
         ]
         for name, fn in probes:
@@ -1268,34 +1283,55 @@ class AwardStudio(ctk.CTk):
         - Windows：原生 DragAcceptFiles + 窗口过程替换（WM_DROPFILES），已验证稳定，优先用；
         - macOS / Linux：tkdnd（tkinterdnd2），macOS 上注册的是整个顶层窗口，
           所以拖到窗口任意位置都能接住。
-        任何一步失败都静默降级，用户仍可点按钮选文件。
+        任何一步失败都静默降级，用户仍可点按钮选文件；失败原因记在 drop_note 里，
+        「--diag」和界面日志都能看到。
         """
         self.drop_backend = "none"
+        self.drop_note = ""
         if sys.platform == "win32" and self._enable_win32_drop():
             self.drop_backend = "win32"
             return
         if self._enable_tkdnd_drop():
             self.drop_backend = "tkdnd"
+        elif self.drop_note:
+            self._log(f"拖放未启用：{self.drop_note}（可以用按钮选择文件）", "warn")
 
     def _enable_tkdnd_drop(self) -> bool:
         """用 tkdnd 兜底（macOS 上唯一可行的窗口内拖放）。"""
         try:
             import tkinterdnd2
+            from tkinterdnd2 import TkinterDnD
 
-            tkinterdnd2.TkinterDnD._require(self)
-        except Exception:  # noqa: BLE001
+            TkinterDnD._require(self)
+        except Exception as exc:  # noqa: BLE001
+            self.drop_note = f"tkdnd 加载失败({exc})"
             return False
         try:
             aqua = str(self.tk.call("tk", "windowingsystem")) == "aqua"
-            # macOS 注册的就是顶层窗口，注册一次即可覆盖全窗口；
-            # Windows/Linux 需要逐个控件注册，子控件上才接得住。
-            targets = [self] if aqua else [self, *self._walk_widgets()]
+            # macOS 的 registerdragwidget 注册的是整个顶层窗口，但
+            # <<DropTargetTypes>> 是按控件记的，决定「这个控件愿不愿意接」，
+            # 所以仍然逐个控件注册；Windows/Linux 更是必须逐个注册。
+            targets = [self, *self._walk_widgets()]
+            registered = 0
             for widget in targets:
-                self.tk.call("tkdnd::drop_target", "register", str(widget), ("DND_Files",))
-            # 绑定只挂在顶层：子控件的事件会沿 bindtags 冒泡到顶层，
-            # 逐控件绑定会让同一次拖动被处理两遍。
-            self.bind("<<Drop>>", self._on_tkdnd_drop, add="+")
-        except Exception:  # noqa: BLE001
+                try:
+                    widget.drop_target_register("DND_Files")
+                    # 关键：必须用 dnd_bind，不能用普通 bind。
+                    # tkdnd 的 <<Drop>> 回调走自定义替换格式（%A %a … %D …），
+                    # 文件路径在 %D 里；普通 bind 用 Tk 标准替换格式拿不到 %D，
+                    # 事件照样触发但 data 为空，表现就是「拖了没反应」且不报错。
+                    widget.dnd_bind("<<Drop>>", self._on_tkdnd_drop)
+                    registered += 1
+                except Exception:  # noqa: BLE001
+                    continue
+            if not registered:
+                self.drop_note = "tkdnd 注册不到任何控件"
+                return False
+            self.drop_note = (f"tkdnd {getattr(tkinterdnd2.TkinterDnD, 'TkdndVersion', '?')}"
+                              f" · {registered} 个控件"
+                              f"{' · aqua' if aqua else ''}")
+        except Exception as exc:  # noqa: BLE001
+            self.drop_note = f"tkdnd 注册失败({exc})"
             return False
         return True
 
@@ -1311,13 +1347,24 @@ class AwardStudio(ctk.CTk):
         return out
 
     def _on_tkdnd_drop(self, event):
-        try:
-            raw = self.tk.splitlist(getattr(event, "data", "") or "")
-        except Exception:  # noqa: BLE001
-            raw = [str(getattr(event, "data", ""))]
-        files = [str(item) for item in raw if str(item).strip()]
+        data = getattr(event, "data", "") or ""
+        if isinstance(data, (list, tuple)):
+            raw = [str(item) for item in data]
+        else:
+            try:
+                raw = [str(item) for item in self.tk.splitlist(data)]
+            except Exception:  # noqa: BLE001
+                raw = [str(data)]
+        files = [item for item in raw if item.strip()]
         if files:
+            # 根窗口和子控件都绑了 <<Drop>>，同一次拖动可能触发两次，去重
+            key = tuple(files)
+            now = time.monotonic()
+            if key == getattr(self, "_last_drop", ()) and now - getattr(self, "_last_drop_at", 0) < 0.8:
+                return getattr(event, "action", None) or "copy"
+            self._last_drop, self._last_drop_at = key, now
             self.after(10, lambda: self._handle_dropped_files(files))
+            self._log(f"拖入 {len(files)} 个文件", "muted")
         return getattr(event, "action", None) or "copy"
 
     def _enable_win32_drop(self) -> bool:
