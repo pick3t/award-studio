@@ -25,6 +25,7 @@ jobs:
           --add-data "assets/icon.png;assets"
           --add-data "assets/icon.ico;assets"
           --collect-all customtkinter
+          --collect-all tkinterdnd2
           app.py
       - uses: actions/upload-artifact@v4
         with:
@@ -54,6 +55,7 @@ jobs:
           --add-data "assets/icon.png;assets"
           --add-data "assets/icon.ico;assets"
           --collect-all customtkinter
+          --collect-all tkinterdnd2
           app.py
       - uses: actions/upload-artifact@v4
         with:
@@ -81,6 +83,7 @@ jobs:
           --add-data "assets/icon.png:assets"
           --add-data "assets/icon.ico:assets"
           --collect-all customtkinter
+          --collect-all tkinterdnd2
           app.py
       - name: Package
         run: |
@@ -112,7 +115,7 @@ jobs:
             |---|---|
             | `AwardStudio.exe` | Windows 10 / 11 64 位（绝大多数人下这个） |
             | `AwardStudio-x86.exe` | Windows 32 位（老机器、32 位系统） |
-            | `AwardStudio-macOS.zip` | macOS（Intel / Apple 芯片通用） |
+            | `AwardStudio-macOS.zip` | macOS（仅 Apple 芯片 / M 系列） |
 
             都是单文件免安装版，双击就能用，不需要装 Python 或 Office。
             Windows 首次运行如果提示「Windows 已保护你的电脑」，点「更多信息 → 仍要运行」；

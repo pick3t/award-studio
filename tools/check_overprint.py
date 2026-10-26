@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import sys
+from copy import deepcopy
 from pathlib import Path
 
 from docx import Document
@@ -48,14 +49,41 @@ def box_texts(path: Path) -> list[str]:
 
 
 def first_run_props(path: Path) -> str | None:
+    """第一个 run 的格式（去掉字体名，字体由生成时统一写死，单独断言）。"""
     document = Document(str(path))
     box = next(document.element.body.iter(qn("w:txbxContent")))
     run = next(box.iter(qn("w:r")))
     props = run.find(qn("w:rPr"))
-    return None if props is None else props.xml
+    if props is None:
+        return None
+    clone = deepcopy(props)
+    for rfonts in clone.iter(qn("w:rFonts")):
+        for attr in ("ascii", "hAnsi", "eastAsia", "cs",
+                     "asciiTheme", "hAnsiTheme", "eastAsiaTheme", "cstheme"):
+            rfonts.attrib.pop(qn(f"w:{attr}"), None)
+    return clone.xml
+
+
+def font_names(path: Path) -> set[str]:
+    document = Document(str(path))
+    names = set()
+    for rfonts in document.element.iter(qn("w:rFonts")):
+        for attr in ("ascii", "hAnsi", "eastAsia", "cs"):
+            value = rfonts.get(qn(f"w:{attr}"))
+            if value:
+                names.add(value)
+    return names
+
+
+def has_theme_font(path: Path) -> bool:
+    document = Document(str(path))
+    return any(rfonts.get(qn(f"w:{attr}")) is not None
+               for rfonts in document.element.iter(qn("w:rFonts"))
+               for attr in ("asciiTheme", "hAnsiTheme", "eastAsiaTheme", "cstheme"))
 
 
 def main() -> int:
+    FONT = "宋体"
     person = OVERPRINT / "奖状套印模板（个人）_占位符.docx"
     team = OVERPRINT / "奖状套印模板（集体）_占位符.docx"
     if not person.exists() or not team.exists():
@@ -80,7 +108,7 @@ def main() -> int:
     players, _, _ = load_players(SHEET, sheet_name="一场地4组")
     entry = winners_of(rank_players(players, winners=1))[0]
     out = OUT / "个人.docx"
-    generate_certificate(person, out, entry, context)
+    generate_certificate(person, out, entry, context, font=FONT)
     texts = [t for t in box_texts(out) if t]
     check(all("{{" not in t and "}}" not in t for t in texts), "个人模板：没有残留占位符")
     check(any(t == entry.player.name for t in texts), f"姓名已填入：{entry.player.name}")
@@ -91,7 +119,7 @@ def main() -> int:
     teams, _, _ = load_players(SHEET, sheet_name="一场地1组集体")
     team_entry = expand_entries(winners_of(rank_players(teams, winners=1)), per_person=False)[0]
     out = OUT / "集体.docx"
-    generate_certificate(team, out, team_entry, context)
+    generate_certificate(team, out, team_entry, context, font=FONT)
     texts = [t for t in box_texts(out) if t]
     check(all("{{" not in t and "}}" not in t for t in texts), "集体模板：没有残留占位符")
     check(any(t == team_entry.player.extras.get("代表队") for t in texts), "代表队已填入")
@@ -113,13 +141,21 @@ def main() -> int:
     # 勾「每人一份」时只填一个人的名字，第二行留空（从原始队记录展开）
     person = expand_entries(winners_of(rank_players(teams, winners=1)), per_person=True)[0]
     out_person = OUT / "集体_每人.docx"
-    generate_certificate(team, out_person, person, context)
+    generate_certificate(team, out_person, person, context, font=FONT)
     texts = [t for t in box_texts(out_person) if t]
     check(person.player.name in texts, f"每人一份时填个人姓名：{person.player.name}")
     others = [t for t in texts if " " in t and len(t) > 6]
     check(not others, f"每人一份时不再拼接全队：{others[:1]}")
 
-    print("3) 合并版：文本框形状 id 必须唯一")
+    print("3) 字体写死：Pages 认不出主题字体，生成时必须显式写死")
+    for path in sorted(OUT.glob("*.docx")):
+        if path.name == "合并版.docx":
+            continue
+        names = font_names(path)
+        check(names == {FONT}, f"{path.name} 字体全部为 {FONT}：{sorted(names)}")
+        check(not has_theme_font(path), f"{path.name} 不再残留主题字体引用")
+
+    print("4) 合并版：文本框形状 id 必须唯一")
     merged = OUT / "合并版.docx"
     from core.certificate import merge_documents
     singles = sorted(OUT.glob("*.docx"))

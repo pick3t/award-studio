@@ -43,6 +43,18 @@ def box_texts(path: Path) -> list[str]:
             for box in document.element.body.iter(qn("w:txbxContent"))]
 
 
+def font_names(path: Path) -> set[str]:
+    """文档里出现的所有显式字体名。"""
+    document = Document(str(path))
+    names = set()
+    for rfonts in document.element.iter(qn("w:rFonts")):
+        for attr in ("ascii", "hAnsi", "eastAsia", "cs"):
+            value = rfonts.get(qn(f"w:{attr}"))
+            if value:
+                names.add(value)
+    return names
+
+
 def main() -> int:
     if not SHEET.exists() or not TEMPLATE.exists():
         print("缺少样本（成绩表或套印模板）")
@@ -93,7 +105,8 @@ def main() -> int:
         OUT.mkdir(parents=True, exist_ok=True)
         for old in OUT.glob("*.docx"):
             old.unlink()
-        window._worker(TEMPLATE, OUT, winners, context, True, list(window.field_rules), False)
+        window._worker(TEMPLATE, OUT, winners, context, True, list(window.field_rules),
+                        False, gui.CERT_FONT)
 
         singles = sorted(p for p in OUT.glob("0*.docx"))
         check(len(singles) == 4, f"生成 4 份单份奖状（{len(singles)}）")
@@ -108,10 +121,17 @@ def main() -> int:
         window._on_source_change(rule, "奖项")
         for old in OUT.glob("*.docx"):
             old.unlink()
-        window._worker(TEMPLATE, OUT, winners, context, True, list(window.field_rules), False)
+        window._worker(TEMPLATE, OUT, winners, context, True, list(window.field_rules),
+                        False, gui.CERT_FONT)
         singles = sorted(p for p in OUT.glob("0*.docx"))
         awards = [box_texts(p)[-2] for p in singles]
         check(awards == ["金", "银", "银", "铜"], f"奖项来源给出奖项：{awards}")
+
+        # 3.5) 字体：走界面同一条路径生成后，字体必须已被写死（Pages 才认得出）
+        fonts = set()
+        for path in singles:
+            fonts |= font_names(path)
+        check(fonts == {gui.CERT_FONT}, f"生成文件字体统一为 {gui.CERT_FONT}：{sorted(fonts)}")
 
         # 4) 合并版分页内容
         merged = OUT / "全部奖状_合并版.docx"

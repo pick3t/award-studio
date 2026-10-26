@@ -308,12 +308,53 @@ def build_mapping(entry: RankedEntry, context: CertificateContext) -> dict[str, 
     return mapping
 
 
+def apply_font(document, font_name: str) -> int:
+    """把整篇文档的字体统一写死成 font_name，返回改动的 rFonts 数量。
+
+    模板里的汉字通常只写了 eastAsiaTheme="minorEastAsia"，真正的字体在
+    theme1.xml 的 <a:font script="Hans"> 里。Pages 解析不了「主题 + 语言脚本」
+    这两层映射，会直接退回自己的默认字体，所以生成时必须把
+    ascii / hAnsi / eastAsia / cs 显式写出来，并把 *Theme 属性删掉
+    （OOXML 里主题属性优先级高于显式字体名）。
+    """
+    name = (font_name or "").strip()
+    if not name:
+        return 0
+
+    roots = [document.element, document.styles.element]
+    for section in document.sections:
+        for part in (section.header, section.footer, section.first_page_header,
+                     section.first_page_footer, section.even_page_header,
+                     section.even_page_footer):
+            try:
+                roots.append(part._element)
+            except Exception:  # noqa: BLE001
+                continue
+
+    changed = 0
+    seen: list = []
+    for root in roots:
+        for rfonts in root.iter(qn("w:rFonts")):
+            if any(rfonts is item for item in seen):
+                continue
+            seen.append(rfonts)
+            for attr in ("asciiTheme", "hAnsiTheme", "eastAsiaTheme", "cstheme"):
+                key = qn(f"w:{attr}")
+                if key in rfonts.attrib:
+                    del rfonts.attrib[key]
+            for attr in ("ascii", "hAnsi", "eastAsia", "cs"):
+                rfonts.set(qn(f"w:{attr}"), name)
+            changed += 1
+    return changed
+
+
 def generate_certificate(
     template: str | Path,
     output: str | Path,
     entry: RankedEntry,
     context: CertificateContext,
     rules: list | None = None,
+    font: str | None = None,
 ) -> int:
     """用模板生成一份奖状，返回替换的占位符数量。"""
     template_path = Path(template)
@@ -345,6 +386,9 @@ def generate_certificate(
 
     for paragraph in _iter_layout_paragraphs(document):
         replaced += _replace_in_paragraph(paragraph, mapping)
+
+    if font:
+        apply_font(document, font)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -437,6 +481,7 @@ def generate_all(
     merged_name: str = "全部奖状_合并版.docx",
     rules: list | None = None,
     per_person: bool = True,
+    font: str | None = None,
 ) -> list[Path]:
     """批量生成奖状，返回生成的文件列表。"""
     out_dir = Path(output_dir)
@@ -450,7 +495,7 @@ def generate_all(
             while path.exists():
                 path = out_dir / f"{stem}_{index}{suffix}"
                 index += 1
-        generate_certificate(template, path, entry, context, rules=rules)
+        generate_certificate(template, path, entry, context, rules=rules, font=font)
         created.append(path)
 
     if merge and created:

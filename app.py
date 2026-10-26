@@ -35,7 +35,7 @@ DATA_DIR = Path(sys.executable).parent if getattr(sys, "frozen", False) else BAS
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.4.1"
 
 from core.certificate import (  # noqa: E402
     CertificateContext,
@@ -84,6 +84,15 @@ else:
 
 # 界面字号（磅）：以正文 12pt 为基准，整体等比缩放
 WINDOW_W, WINDOW_H = 1300, 860
+
+# 生成奖状时统一写入的字体。模板里汉字走的是「主题字体」，Pages 解析不了
+# （macOS 也没有 SimSun），所以生成时把字体写死成各平台系统自带的那一款。
+if sys.platform == "darwin":
+    CERT_FONT = "Songti SC"
+elif sys.platform == "win32":
+    CERT_FONT = "宋体"
+else:
+    CERT_FONT = "Noto Serif CJK SC"
 
 FONT_SIZE_MIN = 10
 FONT_SIZE_MAX = 28
@@ -363,6 +372,8 @@ class AwardStudio(ctk.CTk):
             ("sheet", lambda: self.current_sheet),
             ("players", lambda: len(self.players)),
             ("win_icon", lambda: bool(getattr(self, "_icon_photo", None))),
+            ("drop", lambda: getattr(self, "drop_backend", "?")),
+            ("cert_font", lambda: CERT_FONT),
         ]
         for name, fn in probes:
             try:
@@ -1251,13 +1262,65 @@ class AwardStudio(ctk.CTk):
 
     # -------------------------------------------------------------- 文件拖放
     def _enable_file_drop(self) -> None:
-        """接收从资源管理器拖进窗口的文件。
+        """接收从文件管理器拖进窗口的文件。
 
-        tkinter 自身不支持文件拖放，这里用 Windows 原生的 DragAcceptFiles + 窗口过程
-        替换来处理 WM_DROPFILES。任何一步失败都静默降级，用户仍可点按钮选文件。
+        两条后端，按平台择优：
+        - Windows：原生 DragAcceptFiles + 窗口过程替换（WM_DROPFILES），已验证稳定，优先用；
+        - macOS / Linux：tkdnd（tkinterdnd2），macOS 上注册的是整个顶层窗口，
+          所以拖到窗口任意位置都能接住。
+        任何一步失败都静默降级，用户仍可点按钮选文件。
         """
-        if sys.platform != "win32":
+        self.drop_backend = "none"
+        if sys.platform == "win32" and self._enable_win32_drop():
+            self.drop_backend = "win32"
             return
+        if self._enable_tkdnd_drop():
+            self.drop_backend = "tkdnd"
+
+    def _enable_tkdnd_drop(self) -> bool:
+        """用 tkdnd 兜底（macOS 上唯一可行的窗口内拖放）。"""
+        try:
+            import tkinterdnd2
+
+            tkinterdnd2.TkinterDnD._require(self)
+        except Exception:  # noqa: BLE001
+            return False
+        try:
+            aqua = str(self.tk.call("tk", "windowingsystem")) == "aqua"
+            # macOS 注册的就是顶层窗口，注册一次即可覆盖全窗口；
+            # Windows/Linux 需要逐个控件注册，子控件上才接得住。
+            targets = [self] if aqua else [self, *self._walk_widgets()]
+            for widget in targets:
+                self.tk.call("tkdnd::drop_target", "register", str(widget), ("DND_Files",))
+            # 绑定只挂在顶层：子控件的事件会沿 bindtags 冒泡到顶层，
+            # 逐控件绑定会让同一次拖动被处理两遍。
+            self.bind("<<Drop>>", self._on_tkdnd_drop, add="+")
+        except Exception:  # noqa: BLE001
+            return False
+        return True
+
+    def _walk_widgets(self) -> list:
+        out, stack = [], list(self.winfo_children())
+        while stack:
+            widget = stack.pop()
+            out.append(widget)
+            try:
+                stack.extend(widget.winfo_children())
+            except Exception:  # noqa: BLE001
+                continue
+        return out
+
+    def _on_tkdnd_drop(self, event):
+        try:
+            raw = self.tk.splitlist(getattr(event, "data", "") or "")
+        except Exception:  # noqa: BLE001
+            raw = [str(getattr(event, "data", ""))]
+        files = [str(item) for item in raw if str(item).strip()]
+        if files:
+            self.after(10, lambda: self._handle_dropped_files(files))
+        return getattr(event, "action", None) or "copy"
+
+    def _enable_win32_drop(self) -> bool:
         try:
             import ctypes
             from ctypes import wintypes
@@ -1306,6 +1369,8 @@ class AwardStudio(ctk.CTk):
             user32.SetWindowLongPtrW(hwnd, GWL_WNDPROC, self._wndproc)
         except Exception:  # noqa: BLE001
             self._old_wndproc = None
+            return False
+        return True
 
     @staticmethod
     def _read_dropped_files(hdrop) -> list[str]:
@@ -2309,12 +2374,13 @@ class AwardStudio(ctk.CTk):
         self.generate_btn.configure(state="disabled", text="正在生成…", fg_color="#9CA3AF")
         self.status_label.configure(text=f"正在生成 {total_certificates} 份奖状…", text_color=PRIMARY)
         out_dir = self._target_dir() or self.output_dir
-        self._log(f"开始生成 {total_certificates} 份奖状 → {out_dir}", "info")
+        self._log(f"开始生成 {total_certificates} 份奖状 → {out_dir}（字体 {CERT_FONT}）", "info")
 
         threading.Thread(
             target=self._worker,
             args=(self.template_path, out_dir, winners, context,
-                  bool(self.merge_check.get()), list(self.field_rules), per_person),
+                  bool(self.merge_check.get()), list(self.field_rules), per_person,
+                  CERT_FONT),
             daemon=True,
         ).start()
         self.after(80, self._poll)
@@ -2336,7 +2402,7 @@ class AwardStudio(ctk.CTk):
         return "技能竞赛"
 
     def _worker(self, template: Path, out_dir: Path, winners, context, merge: bool,
-                rules=None, per_person: bool = True) -> None:
+                rules=None, per_person: bool = True, font: str | None = None) -> None:
         created: list[Path] = []
         failures: list[str] = []
         try:
@@ -2351,7 +2417,8 @@ class AwardStudio(ctk.CTk):
                         path = out_dir / f"{stem}_{index}{suffix}"
                         index += 1
                 try:
-                    generate_certificate(template, path, entry, context, rules=rules)
+                    generate_certificate(template, path, entry, context, rules=rules,
+                                         font=font)
                     created.append(path)
                     self.ui_queue.put(("log", f"{path.name} 已生成", "ok"))
                 except CertificateError as exc:
