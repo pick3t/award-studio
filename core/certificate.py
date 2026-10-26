@@ -99,8 +99,28 @@ def _replace_in_paragraph(paragraph, mapping: dict[str, str]) -> int:
     return count
 
 
+def _iter_textbox_paragraphs(root, document):
+    """文本框（Word 浮动形状）里的段落。
+
+    python-docx 不提供接口，只能直接找 w:txbxContent。同一段文字在
+    mc:Choice（DrawingML）与 mc:Fallback（VML）里各存一份，两份都要访问，
+    否则新版 Word 或旧版渲染器可能只认其中一份。
+    """
+    from docx.oxml.ns import qn
+    from docx.text.paragraph import Paragraph
+
+    # 用元素本身去重（lxml 按节点身份比较），id() 会因代理对象回收而误判
+    seen: set = set()
+    for box in root.iter(qn("w:txbxContent")):
+        for element in box.iter(qn("w:p")):
+            if element in seen:
+                continue
+            seen.add(element)
+            yield Paragraph(element, document)
+
+
 def _iter_paragraphs(document):
-    """遍历正文、表格（含嵌套）、页眉页脚的段落。"""
+    """遍历正文、表格（含嵌套）、页眉页脚、文本框的段落。"""
     def walk_tables(tables):
         for table in tables:
             for row in table.rows:
@@ -114,12 +134,14 @@ def _iter_paragraphs(document):
 
     yield from document.paragraphs
     yield from walk_tables(document.tables)
+    yield from _iter_textbox_paragraphs(document.element.body, document)
     for section in document.sections:
         for part in (section.header, section.footer, section.first_page_header,
                      section.first_page_footer, section.even_page_header, section.even_page_footer):
             try:
                 yield from part.paragraphs
                 yield from walk_tables(part.tables)
+                yield from _iter_textbox_paragraphs(part._element, document)
             except Exception:  # noqa: BLE001 - 某些 section 没有对应页眉页脚
                 continue
 
@@ -153,6 +175,9 @@ def build_mapping(entry: RankedEntry, context: CertificateContext) -> dict[str, 
         "award": entry.award or entry.rank_cn,
         "编号": player.no,
         "no": player.no,
+        "分数": f"{player.score:g}",
+        "成绩": f"{player.score:g}",
+        "score": f"{player.score:g}",
         "比赛名称": context.contest,
         "赛事名称": context.contest,
         "contest": context.contest,

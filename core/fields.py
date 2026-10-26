@@ -39,6 +39,8 @@ AUTO_FIELDS: dict[str, str] = {
     "参赛项目": "参赛项目名称",
     "项目名称": "参赛项目名称",
     "代表队": "代表队 / 单位",
+    "分数": "分数",
+    "成绩": "分数",
 }
 
 SOURCE_LABELS = {
@@ -149,6 +151,8 @@ def auto_value(key: str, entry, context) -> str:
         return str(player.extras.get("组别") or "")
     if normalized in ("参赛项目", "项目名称", "项目"):
         return str(player.extras.get("项目名称") or player.extras.get("参赛项目") or "")
+    if normalized in ("分数", "成绩", "得分", "score"):
+        return str(player.fields.get("分数", ""))
     if normalized in ("代表队", "参赛队", "队名", "单位"):
         # 个人项目没有代表队，用「单位」顶上
         return str(player.extras.get("代表队") or player.extras.get("单位") or "")
