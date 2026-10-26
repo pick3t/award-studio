@@ -858,7 +858,8 @@ class AwardStudio(ctk.CTk):
             font=self.font_small, text_color=MUTED, anchor="w",
             justify="left", wraplength=286,
         )
-        mapping_footer = ctk.CTkFrame(self.mapping_section, fg_color="transparent")
+        self.mapping_footer = mapping_footer = ctk.CTkFrame(
+            self.mapping_section, fg_color="transparent")
         mapping_footer.pack(fill="x")
         self.mapping_toggle = ctk.CTkButton(
             mapping_footer, text="收起映射", height=22, fg_color="transparent",
@@ -1381,18 +1382,18 @@ class AwardStudio(ctk.CTk):
         if not has_fields:
             self.mapping_box.pack_forget()
             self.mapping_hint.pack_forget()
-            self.mapping_toggle.pack_forget()
+            self.mapping_footer.pack_forget()
             self.mapping_section.pack_forget()
             return
         if not self.mapping_section.winfo_ismapped():
             self.mapping_section.pack(fill="x", after=self.mapping_anchor)
         self.mapping_hint.pack_forget()
-        # 先按钮后列表，保证容器内顺序稳定
-        if not self.mapping_toggle.winfo_ismapped():
-            self.mapping_toggle.pack(fill="x", pady=(2, 0))
+        # 列表在上、底部按钮条在下
+        if not self.mapping_footer.winfo_ismapped():
+            self.mapping_footer.pack(fill="x", pady=(2, 0))
         if self.mapping_open:
             if not self.mapping_box.winfo_ismapped():
-                self.mapping_box.pack(fill="x", before=self.mapping_toggle)
+                self.mapping_box.pack(fill="x", before=self.mapping_footer)
             self.mapping_toggle.configure(text="收起映射")
         else:
             self.mapping_box.pack_forget()
