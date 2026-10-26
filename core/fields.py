@@ -43,6 +43,12 @@ AUTO_FIELDS: dict[str, str] = {
     "成绩": "分数",
 }
 
+# 「自动」来源下允许换成别的内置字段（比如名次中文 → 奖项）
+AUTO_CHOICES = (
+    "姓名", "名次", "名次中文", "奖项", "编号", "分数",
+    "项目组", "组别", "参赛项目", "代表队", "比赛名称", "颁发单位", "日期",
+)
+
 SOURCE_LABELS = {
     "auto": "自动",
     "column": "表格列",
@@ -162,7 +168,11 @@ def auto_value(key: str, entry, context) -> str:
 def resolve(rule: FieldRule, entry, context, today: date | None = None) -> str:
     """按规则算出这个占位符在某个选手身上应该填什么。"""
     if rule.source == "auto":
-        return auto_value(rule.key, entry, context)
+        # value 里存的是用户选的内置字段，没选（或是旧配置残留）就用占位符自己的名字
+        choice = (rule.value or "").strip()
+        if choice not in AUTO_FIELDS:
+            choice = rule.key
+        return auto_value(choice, entry, context)
     if rule.source == "column":
         return str(entry.player.fields.get(rule.value, ""))
     if rule.source == "text":

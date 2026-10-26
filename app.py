@@ -1441,9 +1441,25 @@ class AwardStudio(ctk.CTk):
     def _build_mapping_value(self, holder, rule) -> None:
         height = self._px(26)
         if rule.source == "auto":
-            ctk.CTkLabel(holder, text=field_rules.AUTO_FIELDS.get(rule.key, "自动取值"),
-                         font=self.font_small, text_color=MUTED, anchor="w",
-                         height=height).pack(fill="x")
+            choices = list(field_rules.AUTO_CHOICES)
+            current = (rule.value or "").strip()
+            if current not in choices:
+                current = rule.key if rule.key in choices else ""
+            if not current:
+                # 占位符名不在内置字段里（比如自定义名字），保留一个只读提示
+                ctk.CTkLabel(holder, text=field_rules.AUTO_FIELDS.get(rule.key, "自动取值"),
+                             font=self.font_small, text_color=MUTED, anchor="w",
+                             height=height).pack(fill="x")
+                return
+            menu = ctk.CTkOptionMenu(
+                holder, values=choices, font=self.font_small,
+                dropdown_font=self.font_small, height=height, corner_radius=7,
+                fg_color="#F8FAFD", button_color="#E8ECF5",
+                button_hover_color="#DDE3EF", text_color=INK,
+                command=lambda value, r=rule: self._set_rule_value(r, value),
+            )
+            menu.set(current)
+            menu.pack(fill="x")
             return
 
         if rule.source == "column":
@@ -2414,6 +2430,8 @@ class AwardStudio(ctk.CTk):
             "· 集体项目：一行代表一支队；默认一队一张、姓名栏放全体队员，"
             "勾上「集体每人一份」才按人拆成多张（「参赛选手」按空格拆开），"
             "{{代表队}} 填队名；同队的名次奖项一致。\n"
+            "· 字段映射选「自动」后，右边还能改选其它内置字段——比如模板写的是 {{名次中文}}，"
+            "想印「金奖」就选成「奖项」（不设奖项时自动退回「第一名」）。\n"
             "· 模板里可写 {{项目组}}（第几组/场地组）、{{参赛项目}}、{{代表队}}，会自动从成绩表取；"
             "个人项目没有代表队时用「单位」顶上。\n"
             "· 同分的选手一定拿同一个奖。如果同分人数超过某个奖项的名额，整组都会按该奖项发放，"
