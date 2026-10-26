@@ -303,6 +303,12 @@ def merge_documents(paths: list[Path], output: str | Path) -> None:
                         pass
             append(new_child)
 
+    # Word 要求 wp:docPr/@id 在整篇文档里唯一。合并时每个源文档的形状 id 都是
+    # 同一套（来自同一个模板），重复 id 会让部分 Word/WPS 把它们当成同一个形状，
+    # 表现为每一页都显示最后一份的内容。这里统一重新编号。
+    for index, doc_pr in enumerate(master.element.body.iter(qn("wp:docPr")), start=1):
+        doc_pr.set("id", str(index))
+
     master.save(str(output))
 
 

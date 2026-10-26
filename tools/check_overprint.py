@@ -98,6 +98,21 @@ def main() -> int:
     check(any(" " in t and len(t) > 10 for t in texts), f"全体队员写在同一栏：{[t for t in texts if ' ' in t][:1]}")
     check(first_run_props(team) == first_run_props(out), "集体模板：格式未被改动")
 
+    print("3) 合并版：文本框形状 id 必须唯一")
+    merged = OUT / "合并版.docx"
+    from core.certificate import merge_documents
+    singles = sorted(OUT.glob("*.docx"))
+    singles = [p for p in singles if p.name in ("个人.docx", "集体.docx")]
+    if len(singles) >= 2:
+        merge_documents(singles, merged)
+        document = Document(str(merged))
+        ids = [element.get("id") for element in
+               document.element.body.iter(
+                   "{http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing}docPr")]
+        check(len(ids) == len(set(ids)), f"合并后 {len(ids)} 个形状 id 全部唯一")
+        check(len(box_texts(merged)) == 26,
+              f"合并版文本框数量 {len(box_texts(merged))}（个人 12 + 集体 14）")
+
     print()
     if failures:
         print(f"失败 {len(failures)} 项：")
