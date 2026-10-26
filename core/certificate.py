@@ -225,9 +225,15 @@ def certificate_filename(entry: RankedEntry) -> str:
     """
     parts = [f"{entry.rank:02d}"]
     team = entry.player.extras.get("代表队", "")
-    if team and team != entry.player.name:
+    name = entry.player.name
+    if team and " " in name:
+        # 一队一份：姓名栏是全体队员，文件名只用队名，避免名字过长
         parts.append(safe_filename(team))
-    parts.append(safe_filename(entry.player.name))
+    elif team and team != name:
+        parts.append(safe_filename(team))
+        parts.append(safe_filename(name))
+    else:
+        parts.append(safe_filename(name))
     if entry.award:
         parts.append(safe_filename(entry.award))
     return "_".join(parts) + ".docx"
@@ -283,13 +289,14 @@ def generate_all(
     merge: bool = False,
     merged_name: str = "全部奖状_合并版.docx",
     rules: list | None = None,
+    per_person: bool = True,
 ) -> list[Path]:
     """批量生成奖状，返回生成的文件列表。"""
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     created: list[Path] = []
-    # 集体项目一队多人：拆成每人一份
-    for entry in expand_entries(winners):
+    # 集体项目：勾选「每人一份」时拆开，否则一队一份（姓名栏放全体队员）
+    for entry in expand_entries(winners, per_person):
         path = out_dir / certificate_filename(entry)
         if path.exists():
             stem, suffix, index = path.stem, path.suffix, 2

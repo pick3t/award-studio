@@ -35,7 +35,7 @@ DATA_DIR = Path(sys.executable).parent if getattr(sys, "frozen", False) else BAS
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.4.0"
 
 from core.certificate import (  # noqa: E402
     CertificateContext,
@@ -944,6 +944,13 @@ class AwardStudio(ctk.CTk):
             fg_color=PRIMARY, hover_color=PRIMARY_HOVER, border_color="#C7CCDA",
         )
         self.merge_check.pack(side="left", padx=(6, 0))
+        self.per_person_check = ctk.CTkCheckBox(
+            output_row, text="集体每人一份", font=self.font_small,
+            text_color=MUTED, checkbox_width=17, checkbox_height=17, corner_radius=5,
+            fg_color=PRIMARY, hover_color=PRIMARY_HOVER, border_color="#C7CCDA",
+            command=self._refresh_stats,
+        )
+        self.per_person_check.pack(side="left", padx=(6, 0))
         ctk.CTkFrame(wrap, fg_color="transparent", height=6).pack(fill="x")
 
     def _step_title(self, parent, badge: str, title: str, subtitle: str) -> None:
@@ -2168,7 +2175,7 @@ class AwardStudio(ctk.CTk):
             return
         scores = [p.score for p in self.players if p.scored]
         winners = winners_of(self.entries)
-        people = expand_entries(winners)
+        people = expand_entries(winners, bool(self.per_person_check.get()))
         self.stat_values["total"].configure(text=str(len(self.players)))
         if not self.score_columns or not scores:
             # 没有选择评判列（或一个人都没分）就不做分数统计
@@ -2221,7 +2228,8 @@ class AwardStudio(ctk.CTk):
         if not winners:
             messagebox.showinfo("没有获奖者", "请设置大于 0 的获奖名额。")
             return
-        total_certificates = certificate_total(winners)
+        per_person = bool(self.per_person_check.get())
+        total_certificates = certificate_total(winners, per_person)
 
         context = CertificateContext(
             contest=self._guess_contest(),
@@ -2238,7 +2246,7 @@ class AwardStudio(ctk.CTk):
         threading.Thread(
             target=self._worker,
             args=(self.template_path, out_dir, winners, context,
-                  bool(self.merge_check.get()), list(self.field_rules)),
+                  bool(self.merge_check.get()), list(self.field_rules), per_person),
             daemon=True,
         ).start()
         self.after(80, self._poll)
@@ -2260,13 +2268,13 @@ class AwardStudio(ctk.CTk):
         return "技能竞赛"
 
     def _worker(self, template: Path, out_dir: Path, winners, context, merge: bool,
-                rules=None) -> None:
+                rules=None, per_person: bool = True) -> None:
         created: list[Path] = []
         failures: list[str] = []
         try:
             out_dir.mkdir(parents=True, exist_ok=True)
             # 集体项目一队多人：拆开，一人一份
-            for entry in expand_entries(winners):
+            for entry in expand_entries(winners, per_person):
                 path = out_dir / certificate_filename(entry)
                 # 同分同名（不同单位同名选手）时避免互相覆盖
                 if path.exists():
@@ -2403,7 +2411,8 @@ class AwardStudio(ctk.CTk):
             "· 分数没填完也能打开：只要有姓名列就能加载；勾选排名依据后，缺分的人排在末尾、"
             "名次显示「—」、不参与发奖，标题旁会提示有几人缺分数。\n"
             "· 只想给一部分人排名：在排名表第一列勾选，或按住左键拖出一段；表头「选」点一下全选/取消。\n"
-            "· 集体项目：一行代表一支队，「参赛选手」按空格拆开，每人一份奖状，"
+            "· 集体项目：一行代表一支队；默认一队一张、姓名栏放全体队员，"
+            "勾上「集体每人一份」才按人拆成多张（「参赛选手」按空格拆开），"
             "{{代表队}} 填队名；同队的名次奖项一致。\n"
             "· 模板里可写 {{项目组}}（第几组/场地组）、{{参赛项目}}、{{代表队}}，会自动从成绩表取；"
             "个人项目没有代表队时用「单位」顶上。\n"

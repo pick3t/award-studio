@@ -179,8 +179,12 @@ def members_of(entry: RankedEntry) -> list[str]:
     return []
 
 
-def expand_entries(entries: list[RankedEntry]) -> list[RankedEntry]:
-    """集体项目：一队多人时拆成每人一条，保证一人一份奖状。"""
+def expand_entries(entries: list[RankedEntry], per_person: bool = True) -> list[RankedEntry]:
+    """集体项目的队员处理。
+
+    per_person=True：一队多人拆成每人一条，一人一份奖状；
+    per_person=False：不拆，把全体队员写进姓名一栏，一份奖状。
+    """
     expanded: list[RankedEntry] = []
     for entry in entries:
         members = members_of(entry)
@@ -189,6 +193,13 @@ def expand_entries(entries: list[RankedEntry]) -> list[RankedEntry]:
             continue
         team = entry.player.name
         roster = " ".join(members)
+        if not per_person:
+            extras = dict(entry.player.extras)
+            extras["代表队"] = team
+            extras["参赛选手"] = roster
+            player = replace(entry.player, name=roster, extras=extras)
+            expanded.append(replace(entry, player=player))
+            continue
         for position, name in enumerate(members, start=1):
             extras = dict(entry.player.extras)
             extras["代表队"] = team
@@ -201,9 +212,9 @@ def expand_entries(entries: list[RankedEntry]) -> list[RankedEntry]:
     return expanded
 
 
-def certificate_total(entries: list[RankedEntry]) -> int:
-    """这些获奖记录最终要生成多少份奖状（集体项目按人算）。"""
-    return len(expand_entries(entries))
+def certificate_total(entries: list[RankedEntry], per_person: bool = True) -> int:
+    """这些获奖记录最终要生成多少份奖状。"""
+    return len(expand_entries(entries, per_person))
 
 
 def safe_filename(text: str, fallback: str = "certificate") -> str:

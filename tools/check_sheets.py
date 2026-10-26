@@ -117,10 +117,17 @@ def main() -> int:
         window._on_heading_click("分数")
         window.update_idletasks()
         winners = winners_of(window.entries)
-        expected_count = certificate_total(winners)
+        plain = window.stat_values["awards"].cget("text")
+        check(plain == str(len(winners)),
+              f"默认不勾「集体每人一份」时按队算：{plain}（队数 {len(winners)}）")
+
+        window.per_person_check.select()
+        window._refresh_stats()
+        expected_count = certificate_total(winners, True)
         shown = window.stat_values["awards"].cget("text")
         check(shown == str(expected_count),
-              f"界面上「奖状份数」按人算：{shown}（队数 {len(winners)}）")
+              f"勾选后「奖状份数」按人算：{shown}（队数 {len(winners)}）")
+        window.per_person_check.deselect()
     finally:
         window.destroy()
 
