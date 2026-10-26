@@ -95,8 +95,29 @@ def main() -> int:
     texts = [t for t in box_texts(out) if t]
     check(all("{{" not in t and "}}" not in t for t in texts), "集体模板：没有残留占位符")
     check(any(t == team_entry.player.extras.get("代表队") for t in texts), "代表队已填入")
-    check(any(" " in t and len(t) > 10 for t in texts), f"全体队员写在同一栏：{[t for t in texts if ' ' in t][:1]}")
+    roster = team_entry.player.extras.get("参赛选手", "").split()
+    lines = []
+    for text in texts:
+        names = text.split()
+        if names and all(name in roster for name in names) and text not in lines:
+            lines.append(text)
+    check(len(lines) >= 2, f"姓名按两行分开放：{lines[:2]}")
+    if len(lines) >= 2:
+        first, second = lines[0].split(), lines[1].split()
+        check(len(first) == len(roster) // 2 and len(second) == len(roster) - len(first),
+              f"两行人数 {len(first)}+{len(second)} = {len(roster)}")
+        check(set(first) | set(second) == set(roster), "两行合起来正好是全体队员")
+        check(not (set(first) & set(second)), "两行之间没有重复的人")
     check(first_run_props(team) == first_run_props(out), "集体模板：格式未被改动")
+
+    # 勾「每人一份」时只填一个人的名字，第二行留空（从原始队记录展开）
+    person = expand_entries(winners_of(rank_players(teams, winners=1)), per_person=True)[0]
+    out_person = OUT / "集体_每人.docx"
+    generate_certificate(team, out_person, person, context)
+    texts = [t for t in box_texts(out_person) if t]
+    check(person.player.name in texts, f"每人一份时填个人姓名：{person.player.name}")
+    others = [t for t in texts if " " in t and len(t) > 6]
+    check(not others, f"每人一份时不再拼接全队：{others[:1]}")
 
     print("3) 合并版：文本框形状 id 必须唯一")
     merged = OUT / "合并版.docx"

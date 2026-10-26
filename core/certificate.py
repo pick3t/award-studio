@@ -146,6 +146,110 @@ def _iter_paragraphs(document):
                 continue
 
 
+MC_NS = "{http://schemas.openxmlformats.org/markup-compatibility/2006}"
+
+
+def _iter_textbox_groups(document):
+    """按「形状」返回文本框：(DrawingML 主框, VML 兼容框)。
+
+    Word 会把每个文本框存两份（mc:Choice / mc:Fallback），它们是同一个形状。
+    """
+    body = document.element.body
+    seen: set = set()
+    groups: list[tuple] = []
+    for alternate in body.iter(f"{MC_NS}AlternateContent"):
+        choice = alternate.find(f"{MC_NS}Choice")
+        fallback = alternate.find(f"{MC_NS}Fallback")
+        box = choice.find(f".//{qn('w:txbxContent')}") if choice is not None else None
+        fb = fallback.find(f".//{qn('w:txbxContent')}") if fallback is not None else None
+        if box is None:
+            continue
+        seen.add(box)
+        if fb is not None:
+            seen.add(fb)
+        groups.append((box, fb))
+    for box in body.iter(qn("w:txbxContent")):
+        if box in seen:
+            continue
+        seen.add(box)
+        groups.append((box, None))
+    return groups
+
+
+def _box_text(box) -> str:
+    return "".join(t.text or "" for t in box.iter(qn("w:t")))
+
+
+def _split_evenly(items: list, parts: int) -> list[list]:
+    """把名字尽量平均分成 parts 份，余数给前面的行。"""
+    base, extra = divmod(len(items), parts)
+    result, start = [], 0
+    for index in range(parts):
+        size = base + (1 if index < extra else 0)
+        result.append(items[start:start + size])
+        start += size
+    return result
+
+
+def _line_overrides(groups, mapping: dict[str, str], entry) -> dict[int, dict[str, str]]:
+    """当同一个占位符出现在多个文本框里时，把多人名单按行分下去。
+
+    典型场景：集体奖状有两个姓名框，8 个人就 4 个一行、4 个一行。
+    只处理「整个框只有一个占位符」的框，避免误伤带固定文字的框。
+    """
+    by_key: dict[str, list] = {}
+    for box, _fb in groups:
+        text = _box_text(box).strip()
+        match = re.fullmatch(r"\{\{\s*([^{}]+?)\s*\}\}|【\s*([^【】]+?)\s*】", text)
+        if not match:
+            continue
+        key = (match.group(1) or match.group(2) or "").strip()
+        by_key.setdefault(key, []).append(box)
+
+    # 只有「姓名」且这一行确实是一支队（有队员名单）时才按行分，避免误拆带空格的值
+    roster = str(entry.player.extras.get("参赛选手", "") or "").strip()
+    roster_tokens = roster.split()
+
+    overrides: dict[int, dict[str, str]] = {}
+    for key, boxes in by_key.items():
+        if len(boxes) < 2 or key not in ("姓名", "name", "选手"):
+            continue
+        if len(roster_tokens) <= 1:
+            continue
+        value = str(mapping.get(key, "") or "").strip()
+        tokens = roster_tokens if value == roster else ([value] if value else [])
+        if not tokens:
+            continue
+        for box, chunk in zip(boxes, _split_evenly(tokens, len(boxes))):
+            overrides[id(box)] = {key: " ".join(chunk)}
+    return overrides
+
+
+def _iter_layout_paragraphs(document):
+    """正文、表格、页眉页脚的段落（不含文本框，文本框单独处理）。"""
+    def walk_tables(tables):
+        for table in tables:
+            for row in table.rows:
+                seen = set()
+                for cell in row.cells:
+                    if id(cell._tc) in seen:
+                        continue
+                    seen.add(id(cell._tc))
+                    yield from cell.paragraphs
+                    yield from walk_tables(cell.tables)
+
+    yield from document.paragraphs
+    yield from walk_tables(document.tables)
+    for section in document.sections:
+        for part in (section.header, section.footer, section.first_page_header,
+                     section.first_page_footer, section.even_page_header, section.even_page_footer):
+            try:
+                yield from part.paragraphs
+                yield from walk_tables(part.tables)
+            except Exception:  # noqa: BLE001
+                continue
+
+
 def inspect_template(path: str | Path) -> list[str]:
     """读出模板里用到的占位符，按在文档中出现的先后顺序返回。"""
     document = Document(str(path))
@@ -226,8 +330,20 @@ def generate_certificate(
     if rules:
         # 用户配置的字段映射优先于内置规则
         mapping.update(field_rules.resolve_all(rules, entry, context))
+
     replaced = 0
-    for paragraph in _iter_paragraphs(document):
+    groups = _iter_textbox_groups(document)
+    overrides = _line_overrides(groups, mapping, entry)
+    for box, fallback in groups:
+        local = dict(mapping)
+        local.update(overrides.get(id(box), {}))
+        for target in (box, fallback):
+            if target is None:
+                continue
+            for paragraph in _iter_textbox_paragraphs(target, document):
+                replaced += _replace_in_paragraph(paragraph, local)
+
+    for paragraph in _iter_layout_paragraphs(document):
         replaced += _replace_in_paragraph(paragraph, mapping)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
