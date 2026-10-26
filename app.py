@@ -1401,9 +1401,11 @@ class AwardStudio(ctk.CTk):
                 text=f"展开映射（{len(self.field_rules)} 个字段）")
 
     def _column_names(self) -> list[str]:
-        if self.players:
-            return list(self.players[0].fields.keys())
-        return list(self.column_names)
+        """可映射的列：成绩表的真实列 + 工作表标题里的「项目组」。"""
+        columns = list(self.players[0].fields.keys()) if self.players else list(self.column_names)
+        if getattr(self, "sheet_subtitle", "") and "项目组" not in columns:
+            columns.append("项目组")
+        return columns
 
     def _refresh_field_rules(self) -> None:
         """按模板占位符重建映射列表，保留用户已配置过的项。"""
@@ -1424,9 +1426,11 @@ class AwardStudio(ctk.CTk):
         """把所有占位符的取值方式恢复成默认（自动 = 同名内置字段）。"""
         if not self.field_rules:
             return
+        columns = self._column_names()
         for rule in self.field_rules:
-            rule.source = "auto"
-            rule.value = ""
+            fresh = field_rules.default_rule(rule.key, columns, None)
+            rule.source = fresh.source
+            rule.value = fresh.value
         self._render_mappings()
         self._save_settings()
         self._log("字段映射已重置为默认", "info")
@@ -1452,8 +1456,10 @@ class AwardStudio(ctk.CTk):
             row = ctk.CTkFrame(self.mapping_box, fg_color="transparent")
             row.pack(fill="x", pady=1)
 
-            # 改过内置字段的（比如名次中文 → 奖项）用橙色标出来，避免以为自己还是默认
-            changed = bool((rule.value or "").strip()) and rule.value.strip() != rule.key
+            # 与默认取值不同的（比如名次中文 → 奖项）用橙色标出来
+            base = field_rules.default_rule(rule.key, self._column_names(), None)
+            changed = rule.source != base.source or (
+                rule.source == "column" and rule.value != base.value)
             ctk.CTkLabel(row, text=rule.key, width=self._px(52), anchor="w",
                          font=self.font_small,
                          text_color=WARNING if changed else INK).pack(side="left")
@@ -1475,26 +1481,11 @@ class AwardStudio(ctk.CTk):
 
     def _build_mapping_value(self, holder, rule) -> None:
         height = self._px(26)
-        if rule.source == "auto":
-            choices = list(field_rules.AUTO_CHOICES)
-            current = (rule.value or "").strip()
-            if current not in choices:
-                current = rule.key if rule.key in choices else ""
-            if not current:
-                # 占位符名不在内置字段里（比如自定义名字），保留一个只读提示
-                ctk.CTkLabel(holder, text=field_rules.AUTO_FIELDS.get(rule.key, "自动取值"),
-                             font=self.font_small, text_color=MUTED, anchor="w",
-                             height=height).pack(fill="x")
-                return
-            menu = ctk.CTkOptionMenu(
-                holder, values=choices, font=self.font_small,
-                dropdown_font=self.font_small, height=height, corner_radius=7,
-                fg_color="#F8FAFD", button_color="#E8ECF5",
-                button_hover_color="#DDE3EF", text_color=INK,
-                command=lambda value, r=rule: self._set_rule_value(r, value),
-            )
-            menu.set(current)
-            menu.pack(fill="x")
+        if rule.source in ("award", "rank"):
+            text = "奖项设置里的奖项（未设奖项时填名次）" if rule.source == "award" \
+                else "按分数排出来的名次（第X名）"
+            ctk.CTkLabel(holder, text=text, font=self.font_small, text_color=MUTED,
+                         anchor="w", height=height).pack(fill="x")
             return
 
         if rule.source == "column":
@@ -1543,14 +1534,15 @@ class AwardStudio(ctk.CTk):
         var.trace_add("write", lambda *_a, r=rule, v=var: self._set_rule_value(r, v.get()))
 
     def _on_source_change(self, rule, label: str) -> None:
-        rule.source = field_rules.LABEL_TO_SOURCE.get(label, "auto")
+        rule.source = field_rules.LABEL_TO_SOURCE.get(label, "text")
         if rule.source == "column":
             names = self._column_names()
             if rule.value not in names:
-                rule.value = names[0] if names else ""
-        elif rule.source == "fixed_date" and not rule.value:
-            rule.value = date.today().isoformat()
-        elif rule.source == "auto":
+                rule.value = field_rules.column_for(rule.key, names) or (names[0] if names else "")
+        elif rule.source == "fixed_date":
+            if not rule.value:
+                rule.value = date.today().isoformat()
+        else:
             rule.value = ""
         self._render_mappings()
         self._save_settings()
@@ -2466,8 +2458,8 @@ class AwardStudio(ctk.CTk):
             "· 集体项目：一行代表一支队；默认一队一张、姓名栏放全体队员，"
             "勾上「集体每人一份」才按人拆成多张（「参赛选手」按空格拆开），"
             "{{代表队}} 填队名；同队的名次奖项一致。\n"
-            "· 字段映射选「自动」后，右边还能改选其它内置字段——比如模板写的是 {{名次中文}}，"
-            "想印「金奖」就选成「奖项」（不设奖项时自动退回「第一名」）。\n"
+            "· 字段映射的来源只有六种：表格列 / 固定值 / 系统日期 / 指定日期 / 奖项 / 名次。"
+            "模板写 {{名次中文}} 想印「金奖」就选「奖项」，想印「第一名」就选「名次」。\n"
             "· 模板里可写 {{项目组}}（第几组/场地组）、{{参赛项目}}、{{代表队}}，会自动从成绩表取；"
             "个人项目没有代表队时用「单位」顶上。\n"
             "· 同分的选手一定拿同一个奖。如果同分人数超过某个奖项的名额，整组都会按该奖项发放，"

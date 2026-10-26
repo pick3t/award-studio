@@ -1,64 +1,50 @@
 """占位符字段映射：决定奖状里每个占位符最终填什么。
 
-每个占位符对应一条规则，来源有四种：
-* auto         程序内置计算（姓名、名次、奖项……）
-* column       取成绩表里的某一列
+来源一共六种，界面里也是这六个选项：
+* column       取成绩表里的某一列（也可以取工作表标题里的「项目组」）
 * text         用户填写的固定文字
 * system_date  当前系统日期
 * fixed_date   用户指定日期
+* award        奖项设置里用户自定义的奖项
+* rank         按分数排出来的名次（第X名）
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date, datetime
 
-# 占位符 -> 内置取值的说明
-AUTO_FIELDS: dict[str, str] = {
-    "姓名": "选手姓名",
-    "name": "选手姓名",
-    "选手": "选手姓名",
-    "名次": "名次数字",
-    "rank": "名次数字",
-    "名次中文": "中文名次",
-    "第几名": "中文名次",
-    "奖项": "奖项等级（不设奖项时为名次）",
-    "award": "奖项等级",
-    "编号": "选手编号",
-    "no": "选手编号",
-    "比赛名称": "比赛名称",
-    "赛事名称": "比赛名称",
-    "contest": "比赛名称",
-    "颁发单位": "颁发单位",
-    "issuer": "颁发单位",
-    "日期": "日期",
-    "date": "日期",
-    # 成绩单里叫法不同：个人表是「组别 + 项目名称」，集体表是「参赛项目」
-    "项目组": "项目组 / 组别",
-    "组别": "项目组 / 组别",
-    "参赛项目": "参赛项目名称",
-    "项目名称": "参赛项目名称",
-    "代表队": "代表队 / 单位",
-    "分数": "分数",
-    "成绩": "分数",
+# 占位符里常见的叫法与成绩表列名的对应关系（模板写「参赛项目」，表里可能叫「项目名称」）
+COLUMN_ALIASES: dict[str, tuple[str, ...]] = {
+    "姓名": ("姓名",),
+    "编号": ("编号", "序号"),
+    "分数": ("分数",),
+    "成绩": ("分数",),
+    "组别": ("组别",),
+    "项目名称": ("项目名称", "参赛项目"),
+    "参赛项目": ("项目名称", "参赛项目"),
+    "代表队": ("代表队", "单位"),
+    "单位": ("单位", "代表队"),
+    "项目组": ("项目组",),
 }
 
-# 「自动」来源下允许换成别的内置字段（比如名次中文 → 奖项）
-AUTO_CHOICES = (
-    "姓名", "名次", "名次中文", "奖项", "编号", "分数",
-    "项目组", "组别", "参赛项目", "代表队", "比赛名称", "颁发单位", "日期",
-)
-
 SOURCE_LABELS = {
-    "auto": "自动",
     "column": "表格列",
     "text": "固定值",
     "system_date": "系统日期",
     "fixed_date": "指定日期",
+    "award": "奖项",
+    "rank": "名次",
 }
 LABEL_TO_SOURCE = {label: key for key, label in SOURCE_LABELS.items()}
 
 DATE_FORMAT = "%Y 年 %m 月 %d 日"
+
+# 旧版本里「自动」的取值 -> 新来源
+_AUTO_AWARD = {"奖项", "award"}
+_AUTO_RANK = {"名次", "rank", "名次中文", "第几名"}
+_AUTO_DATE = {"日期", "date"}
+_AUTO_TEXT = {"比赛名称", "赛事名称", "contest", "颁发单位", "issuer"}
 
 
 @dataclass
@@ -66,21 +52,21 @@ class FieldRule:
     """一个占位符的取值规则。"""
 
     key: str
-    source: str = "auto"
+    source: str = "column"
     value: str = ""
 
     @property
     def source_label(self) -> str:
-        return SOURCE_LABELS.get(self.source, "自动")
+        return SOURCE_LABELS.get(self.source, "表格列")
 
     def to_dict(self) -> dict:
         return {"key": self.key, "source": self.source, "value": self.value}
 
     @classmethod
     def from_dict(cls, data: dict) -> "FieldRule":
-        source = str(data.get("source", "auto"))
+        source = str(data.get("source", "column"))
         if source not in SOURCE_LABELS:
-            source = "auto"
+            source = "text"
         return cls(key=str(data.get("key", "")), source=source,
                    value=str(data.get("value", "")))
 
@@ -100,20 +86,52 @@ def format_date(value: str | date | datetime) -> str:
     return text
 
 
+def column_for(key: str, columns: list[str] | None) -> str | None:
+    """占位符名字该取哪一列：先找同名列，再按别名找。"""
+    if not columns:
+        return None
+    if key in columns:
+        return key
+    for alias in COLUMN_ALIASES.get(key, ()):
+        if alias in columns:
+            return alias
+    return None
+
+
 def default_rule(key: str, columns: list[str] | None = None,
                  context=None) -> FieldRule:
     """给一个占位符挑一个合理的默认来源。"""
-    if key in AUTO_FIELDS:
-        if key in ("日期", "date"):
-            return FieldRule(key, "system_date", "")
-        if key in ("颁发单位", "issuer"):
-            return FieldRule(key, "text", getattr(context, "issuer", "") or "")
-        if key in ("比赛名称", "赛事名称", "contest"):
-            return FieldRule(key, "text", getattr(context, "contest", "") or "")
-        return FieldRule(key, "auto", "")
-    if columns and key in columns:
-        return FieldRule(key, "column", key)
+    if key in ("日期", "date"):
+        return FieldRule(key, "system_date", "")
+    if key in ("奖项", "award"):
+        return FieldRule(key, "award", "")
+    if key in ("名次", "rank", "名次中文", "第几名"):
+        return FieldRule(key, "rank", "")
+    if key in ("比赛名称", "赛事名称", "contest"):
+        return FieldRule(key, "text", getattr(context, "contest", "") or "")
+    if key in ("颁发单位", "issuer"):
+        return FieldRule(key, "text", getattr(context, "issuer", "") or "")
+    hit = column_for(key, columns)
+    if hit:
+        return FieldRule(key, "column", hit)
     return FieldRule(key, "text", "")
+
+
+def _migrate_auto(key: str, choice: str, columns: list[str] | None) -> FieldRule:
+    """把旧配置里的「自动」换算成新的六种来源之一。"""
+    choice = (choice or "").strip() or key
+    if choice in _AUTO_AWARD:
+        return FieldRule(key, "award", "")
+    if choice in _AUTO_RANK:
+        return FieldRule(key, "rank", "")
+    if choice in _AUTO_DATE:
+        return FieldRule(key, "system_date", "")
+    if choice in _AUTO_TEXT:
+        return FieldRule(key, "text", "")
+    hit = column_for(choice, columns)
+    if hit:
+        return FieldRule(key, "column", hit)
+    return default_rule(key, columns)
 
 
 def build_rules(keys: list[str], columns: list[str] | None = None,
@@ -123,64 +141,38 @@ def build_rules(keys: list[str], columns: list[str] | None = None,
     existing = existing or {}
     rules: list[FieldRule] = []
     for key in keys:
-        if key in existing:
-            rules.append(existing[key])
-        else:
+        rule = existing.get(key)
+        if rule is None:
             rules.append(default_rule(key, columns, context))
+            continue
+        if rule.source == "auto":  # 旧版本遗留
+            rules.append(_migrate_auto(key, rule.value, columns))
+            continue
+        if rule.source == "column" and not rule.value.strip():
+            rule.value = column_for(key, columns) or ""
+        rules.append(rule)
     return rules
-
-
-def auto_value(key: str, entry, context) -> str:
-    """内置字段的取值。"""
-    player = entry.player
-    normalized = key.strip().lower()
-    if normalized in ("姓名", "name", "选手"):
-        return player.name
-    if normalized in ("名次", "rank"):
-        return str(entry.rank)
-    if normalized in ("名次中文", "第几名"):
-        return entry.rank_cn
-    if normalized in ("奖项", "award"):
-        return entry.award or entry.rank_cn
-    if normalized in ("编号", "no"):
-        return player.no
-    if normalized in ("比赛名称", "赛事名称", "contest"):
-        return context.contest
-    if normalized in ("颁发单位", "issuer"):
-        return context.issuer
-    if normalized in ("日期", "date"):
-        return context.date
-    if normalized in ("项目组", "组"):
-        extra = getattr(context, "extra", None) or {}
-        return str(extra.get("项目组") or player.extras.get("项目组") or "")
-    if normalized == "组别":
-        return str(player.extras.get("组别") or "")
-    if normalized in ("参赛项目", "项目名称", "项目"):
-        return str(player.extras.get("项目名称") or player.extras.get("参赛项目") or "")
-    if normalized in ("分数", "成绩", "得分", "score"):
-        return str(player.fields.get("分数", ""))
-    if normalized in ("代表队", "参赛队", "队名", "单位"):
-        # 个人项目没有代表队，用「单位」顶上
-        return str(player.extras.get("代表队") or player.extras.get("单位") or "")
-    return ""
 
 
 def resolve(rule: FieldRule, entry, context, today: date | None = None) -> str:
     """按规则算出这个占位符在某个选手身上应该填什么。"""
-    if rule.source == "auto":
-        # value 里存的是用户选的内置字段，没选（或是旧配置残留）就用占位符自己的名字
-        choice = (rule.value or "").strip()
-        if choice not in AUTO_FIELDS:
-            choice = rule.key
-        return auto_value(choice, entry, context)
     if rule.source == "column":
-        return str(entry.player.fields.get(rule.value, ""))
+        name = rule.value.strip()
+        if name == "项目组":
+            extra = getattr(context, "extra", None) or {}
+            return str(extra.get("项目组") or entry.player.extras.get("项目组") or "")
+        return str(entry.player.fields.get(name, ""))
     if rule.source == "text":
         return rule.value
     if rule.source == "system_date":
         return format_date(today or date.today())
     if rule.source == "fixed_date":
         return format_date(rule.value) if rule.value else format_date(today or date.today())
+    if rule.source == "award":
+        # 奖项设置里自定义的奖项；没设奖项时退回名次说法
+        return entry.award or entry.rank_cn
+    if rule.source == "rank":
+        return entry.rank_cn
     return ""
 
 

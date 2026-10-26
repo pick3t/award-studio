@@ -71,7 +71,13 @@ def main() -> int:
                 yield from walk(child)
 
         menus = [w for row in rows for w in walk(row) if isinstance(w, ctk.CTkOptionMenu)]
-        check(len(menus) >= len(rows) * 2, f"来源与取值都是下拉（共 {len(menus)} 个下拉）")
+        check(len(menus) >= len(rows),
+              f"每行都有来源下拉（共 {len(menus)} 个下拉）")
+        labels = list(gui.field_rules.SOURCE_LABELS.values())
+        check(labels == ["表格列", "固定值", "系统日期", "指定日期", "奖项", "名次"],
+              f"来源只有 6 种：{labels}")
+        check(all(r.source in gui.field_rules.SOURCE_LABELS for r in window.field_rules),
+              "所有规则都用了新的 6 种来源之一")
 
         # 3) 名次中文 → 奖项，生成四份
         window.award_switch.select()
@@ -82,7 +88,7 @@ def main() -> int:
         check(len(winners) == 4, f"4 人获奖（{len(winners)}）")
 
         rule = next(r for r in window.field_rules if r.key == "名次中文")
-        window._set_rule_value(rule, "奖项")
+        window._on_source_change(rule, "名次")
         context = CertificateContext(contest="自测", issuer="组委会", date="2026 年 10 月 26 日")
         OUT.mkdir(parents=True, exist_ok=True)
         for old in OUT.glob("*.docx"):
@@ -95,7 +101,17 @@ def main() -> int:
         for path in singles:
             texts = box_texts(path)
             awards.append(texts[-2] if len(texts) >= 2 else "")
-        check(awards == ["金", "银", "银", "铜"], f"四份依次是 金/银/银/铜：{awards}")
+        check(awards == ["第一名", "第二名", "第三名", "第四名"],
+              f"名次来源给出第X名：{awards}")
+
+        # 改成「奖项」来源
+        window._on_source_change(rule, "奖项")
+        for old in OUT.glob("*.docx"):
+            old.unlink()
+        window._worker(TEMPLATE, OUT, winners, context, True, list(window.field_rules), False)
+        singles = sorted(p for p in OUT.glob("0*.docx"))
+        awards = [box_texts(p)[-2] for p in singles]
+        check(awards == ["金", "银", "银", "铜"], f"奖项来源给出奖项：{awards}")
 
         # 4) 合并版分页内容
         merged = OUT / "全部奖状_合并版.docx"
@@ -116,7 +132,7 @@ def main() -> int:
         for item in failures:
             print(" - " + item)
         return 1
-    print("全部通过 ✓ 映射可显示可改，单份与合并版内容都正确")
+    print("全部通过 ✓ 六种来源可选，奖项/名次/合并版都对")
     return 0
 
 
