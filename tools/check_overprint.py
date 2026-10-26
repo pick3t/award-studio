@@ -131,8 +131,14 @@ def main() -> int:
                document.element.body.iter(
                    "{http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing}docPr")]
         check(len(ids) == len(set(ids)), f"合并后 {len(ids)} 个形状 id 全部唯一")
-        check(len(box_texts(merged)) == 26,
-              f"合并版文本框数量 {len(box_texts(merged))}（个人 12 + 集体 14）")
+        # 文本框数量不写死：随模板结构变化（是否带 VML 兼容副本）自动跟随，
+        # 只保证「合并后不丢形状」这一条真正的不变量。
+        counts = {path.name: len(box_texts(path)) for path in singles}
+        expected_boxes = sum(counts.values())
+        actual_boxes = len(box_texts(merged))
+        detail = " + ".join(f"{name.split('.')[0]} {count}" for name, count in counts.items())
+        check(actual_boxes == expected_boxes,
+              f"合并版文本框数量 {actual_boxes} = {detail}")
 
     print()
     if failures:
