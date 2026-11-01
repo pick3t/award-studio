@@ -16,9 +16,11 @@ import re
 import sys
 import threading
 import time
+import tkinter
 from datetime import date, datetime
 from pathlib import Path
-from tkinter import filedialog, messagebox, simpledialog, ttk
+from tkinter import filedialog, simpledialog, ttk
+from tkinter import messagebox as _tk_messagebox
 
 if sys.platform == "win32":
     # 让 Windows 按系统缩放渲染，避免高分屏下界面被截断
@@ -44,7 +46,7 @@ DATA_DIR = Path(sys.executable).parent if getattr(sys, "frozen", False) else BAS
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.5.13"
 
 from core.certificate import (  # noqa: E402
     CertificateContext,
@@ -72,6 +74,282 @@ from core.tencent_docs import (  # noqa: E402
     default_cache_dir,
     sync_to_cache,
 )
+
+
+class _ParentedMessageBox:
+    """显示弹窗前统一补一个 parent。
+
+    macOS 上不指定 parent 的 messagebox 有可能弹到主窗口**后面**，
+    但模态状态照样生效——表现就是「窗口还在，点什么都没反应」。
+    显式传了 parent 的（对话框内部那些）保持原样。
+    """
+
+    def __getattr__(self, name: str):
+        original = getattr(_tk_messagebox, name)
+
+        def call(*args, **kwargs):
+            if "parent" not in kwargs:
+                root = getattr(tkinter, "_default_root", None)
+                if root is not None:
+                    try:
+                        if root.winfo_exists():
+                            kwargs["parent"] = root
+                    except Exception:  # noqa: BLE001
+                        pass
+            return original(*args, **kwargs)
+
+        return call
+
+
+messagebox = _ParentedMessageBox()
+
+
+class Picker(ctk.CTkFrame):
+    """应用窗口内的浮层下拉。
+
+    触发器是「左文字 + 右箭头」两段式：用 CTkFrame 装两个 CTkLabel，
+    箭头贴右边，不像 CTkButton 那样只能把图标紧跟在文字后面（右边留一大片白）。
+
+    选项列表同样是主窗口里的浮动卡片（place + lift），不新建系统窗口；
+    ttk.Combobox 在 macOS 上是原生绘制、改不动样式，原生 Menu 又会被拖放库
+    一直亮着，所以这里自己画。
+
+    注意属性名统一带 `_pk_` 前缀，避免和 CTk 内部字段撞名。
+    """
+
+    _open_picker = None
+
+    def __init__(self, master, values=None, command=None, value: str = "",
+                 width: int = 150, height: int = 28, font=None,
+                 text_color="#111827", bg="#FFFFFF", border="#E8EBF2",
+                 arrow_color="#8A93A6", radius: int = 7, **kwargs):
+        super().__init__(master, width=width, height=height, corner_radius=radius,
+                         fg_color=bg, border_width=1, border_color=border)
+        self.pack_propagate(False)
+        self.grid_propagate(False)
+
+        self._pk_values = list(values or [])
+        self._pk_command = command
+        self._pk_value = value or (self._pk_values[0] if self._pk_values else "")
+        self._pk_font = font
+        self._pk_bg = bg
+        self._pk_border = border
+        self._pk_radius = radius
+        self._pk_text_color = text_color
+        self._pk_enabled = True
+        self._pk_card = None
+        self._pk_bind_id = None
+        self._pk_esc_id = None
+        self._pk_skip_toggle = False
+
+        self._label = ctk.CTkLabel(self, text="", font=font, text_color=text_color,
+                                   anchor="w")
+        self._label.pack(side="left", fill="both", expand=True, padx=(10, 2))
+        self._arrow = ctk.CTkLabel(self, text="▾", font=font, text_color=arrow_color,
+                                   width=14, anchor="e")
+        self._arrow.pack(side="right", padx=(0, 9))
+
+        # 只绑「真实点击的落点」：CTk 控件的 bind 会转发到内部 canvas，
+        # 若在控件和 canvas 上各绑一次，一次点击会触发两次 toggle
+        # ——刚打开又被自己关掉，表现就是「点了没反应」。
+        for widget in (self, self._label, self._arrow):
+            inner = getattr(widget, "_canvas", None)
+            target = inner if inner is not None else widget
+            try:
+                target.bind("<Button-1>", self._pk_click, add="+")
+                target.bind("<Enter>", self._pk_hover_on, add="+")
+                target.bind("<Leave>", self._pk_hover_off, add="+")
+            except Exception:  # noqa: BLE001
+                continue
+            try:
+                widget.configure(cursor="pointinghand")
+            except Exception:  # noqa: BLE001
+                pass
+
+        self._pk_show()
+        self.bind("<Destroy>", self._pk_on_destroy, add="+")
+
+    # ---------------------------------------------------------------- 对外
+    def get(self) -> str:
+        return self._pk_value
+
+    def set(self, value: str) -> None:
+        self._pk_value = value
+        self._pk_show()
+
+    def configure(self, **kwargs):
+        values = kwargs.pop("values", None)
+        if values is not None:
+            self._pk_values = list(values)
+            if self._pk_value not in self._pk_values:
+                self._pk_value = self._pk_values[0] if self._pk_values else ""
+                self._pk_show()
+        callback = kwargs.pop("command", None)
+        if callback is not None:
+            self._pk_command = callback
+        state = kwargs.pop("state", None)
+        if state is not None:
+            self._pk_enabled = str(state) != "disabled"
+        font = kwargs.pop("font", None)
+        if font is not None:
+            self._pk_font = font
+            self._label.configure(font=font)
+            self._arrow.configure(font=font)
+        color = kwargs.pop("text_color", None)
+        if color is not None:
+            self._pk_text_color = color
+            self._label.configure(text_color=color)
+        if "width" in kwargs or "height" in kwargs:
+            super().configure(**{k: v for k, v in kwargs.items()
+                                 if k in ("width", "height")})
+
+    # ---------------------------------------------------------------- 内部
+    def _pk_show(self) -> None:
+        self._label.configure(text=self._pk_value or "—")
+
+    def _pk_hover_on(self, _event=None) -> None:
+        if self._pk_enabled:
+            self.configure(fg_color="#F4F7FD")
+
+    def _pk_hover_off(self, _event=None) -> None:
+        self.configure(fg_color=self._pk_bg)
+
+    def _pk_click(self, _event=None) -> None:
+        if self._pk_enabled:
+            self.toggle()
+
+    def toggle(self) -> None:
+        # 点触发器本身时，<Button-1> 已经把浮层关掉了，这次点击不该再打开
+        if self._pk_skip_toggle:
+            self._pk_skip_toggle = False
+            return
+        if self._pk_card is not None:
+            self.close()
+        else:
+            self.open()
+
+    def open(self) -> None:
+        if not self._pk_values or not self._pk_enabled:
+            return
+        Picker.close_all()
+        top = self.winfo_toplevel()
+
+        item_height = 26
+        width = max(self.winfo_width(), 168)
+        many = len(self._pk_values) > 9
+        rows_h = (9 if many else len(self._pk_values)) * item_height
+        card_h = rows_h + 10
+
+        card = ctk.CTkFrame(top, width=width, height=card_h,
+                            fg_color=self._pk_bg, corner_radius=self._pk_radius,
+                            border_width=1, border_color=self._pk_border)
+        card.pack_propagate(False)
+        card.grid_propagate(False)
+
+        if many:
+            rows_host = ctk.CTkScrollableFrame(
+                card, fg_color=self._pk_bg, corner_radius=0,
+                scrollbar_button_color="#DDE1EA",
+                scrollbar_button_hover_color="#C9CFDD",
+                width=width - 12, height=rows_h,
+            )
+            rows_host.pack(fill="both", expand=True, padx=3, pady=4)
+        else:
+            rows_host = card
+            ctk.CTkFrame(card, fg_color="transparent", height=4).pack(fill="x")
+
+        for option in self._pk_values:
+            active = option == self._pk_value
+            item = ctk.CTkButton(
+                rows_host, text=option or "—", anchor="w", height=item_height - 2,
+                corner_radius=5, font=self._pk_font,
+                fg_color=PRIMARY_SOFT if active else "transparent",
+                hover_color=PRIMARY_SOFT,
+                text_color=PRIMARY if active else INK,
+            )
+            # 自己绑「按下」：CTkButton 的 command 在松开时才触发，而浮层
+            # 收起得早，靠 command 会漏掉；按下即选中最稳。
+            item._canvas.bind("<ButtonPress-1>",
+                              lambda _e, v=option: self._pk_pick(v), add="+")
+            item.pack(fill="x", padx=3, pady=1)
+
+        top_x, top_y = top.winfo_rootx(), top.winfo_rooty()
+        x = self.winfo_rootx() - top_x
+        y = self.winfo_rooty() - top_y + self.winfo_height() + 3
+        if y + card_h > top.winfo_height() - 8:            # 下面放不下就翻到上面
+            y = max(8, self.winfo_rooty() - top_y - card_h - 3)
+        x = max(6, min(x, top.winfo_width() - width - 6))
+        card.place(x=x, y=y)
+        card.lift()
+
+        self._pk_card = card
+        self._pk_bind_id = top.bind("<Button-1>", self._pk_maybe_close, add="+")
+        self._pk_esc_id = top.bind("<Escape>", self._pk_escape, add="+")
+        Picker._open_picker = self
+
+    def _pk_on_destroy(self, event) -> None:
+        if event.widget is self:
+            self.close()
+
+    def _pk_escape(self, _event=None):
+        self.close()
+
+    def _pk_maybe_close(self, event) -> None:
+        """点浮层外面就收起（同一个窗口内的事件，可靠）。"""
+        card = self._pk_card
+        if card is None or event.widget is None:
+            return
+        node = event.widget
+        while node is not None:
+            if node is card:
+                return
+            if node is self or getattr(node, "master", None) is self:
+                self._pk_skip_toggle = True
+                break
+            node = getattr(node, "master", None)
+        self.close()
+
+    def _pk_pick(self, option: str) -> None:
+        self._pk_value = option
+        self._pk_show()
+        callback = self._pk_command
+        self.close()
+        if callback is not None:
+            callback(option)
+
+    def close(self) -> None:
+        card, self._pk_card = self._pk_card, None
+        if Picker._open_picker is self:
+            Picker._open_picker = None
+        if card is None:
+            return
+        top = self.winfo_toplevel()
+        if self._pk_bind_id is not None:
+            try:
+                top.unbind("<Button-1>", self._pk_bind_id)
+            except Exception:  # noqa: BLE001
+                pass
+            self._pk_bind_id = None
+        if self._pk_esc_id is not None:
+            try:
+                top.unbind("<Escape>", self._pk_esc_id)
+            except Exception:  # noqa: BLE001
+                pass
+            self._pk_esc_id = None
+        try:
+            card.destroy()
+        except Exception:  # noqa: BLE001
+            pass
+
+    @classmethod
+    def close_all(cls) -> None:
+        picker = cls._open_picker
+        if picker is not None:
+            try:
+                picker.close()
+            except Exception:  # noqa: BLE001
+                pass
+
 
 # ------------------------------------------------------------------ 设计令牌
 BG = "#F3F5FA"
@@ -235,6 +513,289 @@ class DatePicker(ctk.CTkToplevel):
 
     def _pick_today(self) -> None:
         self._pick(self.today)
+
+
+class TencentTokenDialog(ctk.CTkToplevel):
+    """个人开发者 Token 录入框。
+
+    个人主体在开放平台拿不到 Client ID（第三方应用只对企业主体开放），
+    只能从「文档列表页 → 更多操作 → 开放平台 → 龙虾专用入口」拿一个长期 Token。
+    """
+
+    def __init__(self, master, on_saved) -> None:
+        super().__init__(master)
+        self.on_saved = on_saved
+        self.title("连接腾讯文档")
+        self.configure(fg_color=BG)
+        self.geometry("470x520")
+        self.resizable(False, False)
+        self.transient(master)
+
+        card = ctk.CTkFrame(self, corner_radius=16, fg_color=CARD,
+                            border_width=1, border_color=LINE)
+        card.pack(fill="both", expand=True, padx=16, pady=16)
+
+        ctk.CTkLabel(card, text="粘贴腾讯文档个人 Token", font=("", 16, "bold"),
+                     text_color=INK).pack(pady=(18, 6))
+        ctk.CTkLabel(
+            card,
+            text=("1. 用微信 / QQ 登录 docs.qq.com\n"
+                  "2. 文档列表页右上角「更多操作 → 开放平台」\n"
+                  "3. 进入「龙虾专用入口」，复制里面的 Token 粘到下面"),
+            font=("", 11), text_color=MUTED, justify="left", anchor="w",
+            wraplength=390,
+        ).pack(fill="x", padx=22, pady=(0, 10))
+
+        ctk.CTkButton(card, text="打开腾讯文档", height=34, corner_radius=9,
+                      fg_color="#F8FAFD", hover_color="#EFF3FA", text_color=INK,
+                      border_width=1, border_color=LINE,
+                      command=lambda: tdoc_auth.open_in_browser("https://docs.qq.com/")
+                      ).pack(fill="x", padx=22)
+
+        self.entry = ctk.CTkEntry(card, height=38, corner_radius=9,
+                                  placeholder_text="在这里粘贴 Token", font=("", 12))
+        self.entry.pack(fill="x", padx=22, pady=(12, 6))
+        saved = str(prefs.load().get("tdoc_token") or "")
+        if saved:
+            self.entry.insert(0, saved)
+
+        self.status = ctk.CTkLabel(card, text="", font=("", 11), text_color=MUTED)
+        self.status.pack(pady=(2, 8))
+
+        ctk.CTkButton(card, text="保存", height=40, corner_radius=10,
+                      fg_color=PRIMARY, hover_color=PRIMARY_HOVER,
+                      command=self._save).pack(fill="x", padx=22)
+        ctk.CTkButton(card, text="取消", height=32, corner_radius=9,
+                      fg_color="transparent", hover_color="#F1F4FA", text_color=MUTED,
+                      command=self.destroy).pack(fill="x", padx=22, pady=(6, 14))
+
+        self.after(120, self._focus_self)
+
+    def _focus_self(self) -> None:
+        try:
+            self.grab_set()
+            self.lift()
+            self.entry.focus_set()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _save(self) -> None:
+        token = self.entry.get().strip()
+        if not token:
+            self.status.configure(text="Token 不能为空", text_color=DANGER)
+            return
+        if len(token) < 16:
+            self.status.configure(text="这个长度不太像 Token，确认下有没有复制全",
+                                  text_color=WARNING)
+            return
+        data = prefs.load()
+        data["tdoc_token"] = token
+        prefs.save(data)
+        self.destroy()
+        self.on_saved()
+
+
+class TencentAuthDialog(ctk.CTkToplevel):
+    """扫码授权弹窗。
+
+    展示一张二维码（内容就是腾讯的授权页地址，手机微信/QQ 扫码即可），
+    同时在后台起本地 HTTPS 回调等 code；收到就换 token 并回调 `on_success`。
+    扫码不方便时有两个兜底：在浏览器里打开、手动粘贴回调链接。
+    """
+
+    def __init__(self, master, credentials, url: str, state: str, on_success) -> None:
+        super().__init__(master)
+        self.credentials = credentials
+        self.oauth_state = state  # 不能叫 self.state：会盖掉 Toplevel.state() 方法
+        self.on_success = on_success
+        self.server = None
+        self._queue: queue.Queue = queue.Queue()
+        self._after_id = None
+        self._finished = False
+
+        self.title("连接腾讯文档")
+        self.configure(fg_color=BG)
+        self.geometry("440x640")
+        self.resizable(False, False)
+        self.transient(master)
+        self.protocol("WM_DELETE_WINDOW", self._close)
+
+        card = ctk.CTkFrame(self, corner_radius=16, fg_color=CARD,
+                            border_width=1, border_color=LINE)
+        card.pack(fill="both", expand=True, padx=16, pady=16)
+
+        ctk.CTkLabel(card, text="用微信或 QQ 扫码授权", font=("", 16, "bold"),
+                     text_color=INK).pack(pady=(20, 4))
+        ctk.CTkLabel(
+            card,
+            text="授权后本软件可以读取你有权限的在线表格（只读，不会修改）",
+            font=("", 11), text_color=MUTED, wraplength=340, justify="center",
+        ).pack(pady=(0, 12))
+
+        qr_image = self._make_qr(url)
+        if qr_image is not None:
+            ctk.CTkLabel(card, image=qr_image, text="").pack(pady=(0, 10))
+        else:
+            ctk.CTkLabel(card, text="（二维码生成失败，请用下面的浏览器按钮）",
+                         font=("", 11), text_color=WARNING).pack(pady=(0, 8))
+            box = ctk.CTkTextbox(card, height=70, font=("", 10), wrap="char")
+            box.pack(fill="x", padx=24)
+            box.insert("1.0", url)
+            box.configure(state="disabled")
+
+        self.status = ctk.CTkLabel(card, text="等待扫码…", font=("", 12), text_color=PRIMARY)
+        self.status.pack(pady=(6, 10))
+
+        ctk.CTkButton(card, text="在浏览器中打开授权页", height=38, corner_radius=9,
+                      fg_color="#F8FAFD", hover_color="#EFF3FA", text_color=INK,
+                      border_width=1, border_color=LINE,
+                      command=lambda: tdoc_auth.open_in_browser(url)).pack(fill="x", padx=24)
+
+        ctk.CTkButton(card, text="已经授权，粘贴回调链接", height=34, corner_radius=9,
+                      fg_color="transparent", hover_color="#F1F4FA", text_color=MUTED,
+                      command=self._paste_callback).pack(fill="x", padx=24, pady=(6, 0))
+
+        ctk.CTkButton(card, text="取消", height=32, corner_radius=9,
+                      fg_color="transparent", hover_color="#F1F4FA", text_color=MUTED,
+                      command=self._close).pack(fill="x", padx=24, pady=(10, 16))
+
+        self.after(80, self._start_listening)
+        self.after(120, self._poll_queue)
+        self.after(150, self._focus_self)
+
+    # ---------------------------------------------------------------- 界面
+    def _focus_self(self) -> None:
+        try:
+            self.grab_set()
+            self.lift()
+            self.focus_force()
+        except Exception:  # noqa: BLE001
+            pass
+
+    @staticmethod
+    def _make_qr(url: str):
+        try:
+            import qrcode
+            from customtkinter import CTkImage
+
+            code = qrcode.QRCode(box_size=8, border=2)
+            code.add_data(url)
+            code.make()
+            image = code.make_image(fill_color="#111827", back_color="#FFFFFF")
+            if hasattr(image, "get_image"):
+                image = image.get_image()
+            image = image.convert("RGB")
+            return CTkImage(light_image=image, size=(220, 220))
+        except Exception:  # noqa: BLE001 - 没装 qrcode 也能退化成链接
+            return None
+
+    def _set_status(self, text: str, color: str) -> None:
+        try:
+            self.status.configure(text=text, text_color=color)
+        except Exception:  # noqa: BLE001
+            pass
+
+    # ---------------------------------------------------------------- 收码
+    def _start_listening(self) -> None:
+        redirect = (self.credentials.redirect_uri or "").lower()
+        if not redirect.startswith("https://127.0.0.1"):
+            self._set_status("请在浏览器里完成授权，再把回调链接粘回来", MUTED)
+            return
+        try:
+            server = tdoc_auth.LocalCallbackServer(prefs.settings_path().parent)
+            server.start()
+            self.server = server
+        except (tdoc_auth.TencentAuthError, OSError) as exc:
+            self._set_status(f"本地回调不可用（{exc}），请用粘贴方式", WARNING)
+            return
+
+        def wait() -> None:
+            try:
+                code, got_state = server.wait(180)
+                self._queue.put(("code", code, got_state))
+            except tdoc_auth.TencentAuthError as exc:
+                self._queue.put(("error", str(exc), getattr(exc, "hint", "")))
+
+        threading.Thread(target=wait, daemon=True).start()
+
+    def _paste_callback(self) -> None:
+        raw = simpledialog.askstring(
+            "粘贴授权结果",
+            "浏览器授权后，把地址栏整条链接复制粘贴到这里\n（形如 https://…/callback?code=…&state=…）：",
+            parent=self,
+        )
+        if not raw:
+            return
+        try:
+            code, got_state = tdoc_auth.parse_callback(raw)
+        except tdoc_auth.TencentAuthError as exc:
+            messagebox.showerror("粘贴内容无法识别",
+                                 f"{exc}\n\n{getattr(exc, 'hint', '')}".strip(), parent=self)
+            return
+        self._set_status("正在换取令牌…", PRIMARY)
+        self._exchange(code, got_state)
+
+    def _poll_queue(self) -> None:
+        if self._finished:
+            return
+        try:
+            while True:
+                message = self._queue.get_nowait()
+                if message[0] == "code":
+                    self._set_status("已收到授权码，正在换取令牌…", PRIMARY)
+                    self._exchange(message[1], message[2])
+                elif message[0] == "error":
+                    self._set_status(f"授权失败：{message[1]}", DANGER)
+                elif message[0] == "tokens":
+                    self._done(message[1])
+                    return
+                elif message[0] == "token_error":
+                    detail = message[1] + (f"\n{message[2]}" if message[2] else "")
+                    self._set_status(f"换取令牌失败：{message[1]}", DANGER)
+                    messagebox.showerror("授权失败", detail, parent=self)
+        except queue.Empty:
+            pass
+        self._after_id = self.after(150, self._poll_queue)
+
+    def _exchange(self, code: str, got_state: str) -> None:
+        if got_state and self.oauth_state and got_state != self.oauth_state:
+            self._set_status("state 不匹配，授权可能被篡改，请重新发起", DANGER)
+            return
+
+        def work() -> None:
+            try:
+                tokens = tdoc_auth.exchange_code(self.credentials, code)
+            except tdoc_auth.TencentAuthError as exc:
+                self._queue.put(("token_error", str(exc), getattr(exc, "hint", "")))
+                return
+            tdoc_auth.TokenStore().save(tokens)
+            self._queue.put(("tokens", tokens))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _done(self, tokens) -> None:
+        self._finished = True
+        if self.server is not None:
+            self.server.stop()
+        try:
+            self.destroy()
+        except Exception:  # noqa: BLE001
+            pass
+        self.on_success(tokens)
+
+    def _close(self) -> None:
+        self._finished = True
+        if self.server is not None:
+            self.server.stop()
+        if self._after_id is not None:
+            try:
+                self.after_cancel(self._after_id)
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            self.destroy()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def open_path(path) -> None:
@@ -1041,6 +1602,158 @@ class AwardStudio(ctk.CTk, _DnDWrapper):
         self.per_person_check.pack(side="left", padx=(6, 0))
         ctk.CTkFrame(wrap, fg_color="transparent", height=6).pack(fill="x")
 
+        # 面板里的滑块会吞掉滚轮事件，统一补一层绑定（后续重建的控件也要补）
+        self._bind_left_scroll()
+
+    LEFT_SCROLL_TAG = "AwardLeftScroll"
+
+    def _bind_left_scroll(self) -> None:
+        """让左侧面板在任何控件上都能用滚轮 / 双指滚动。
+
+        customtkinter 的 CTkScrollableFrame 在判定里**显式跳过** CTkSlider、
+        CTkTextbox、CTkScrollbar（`_check_if_valid_scroll` 返回 False），
+        所以指针落在这几个控件上时整个面板就不滚了。
+
+        这里不逐个 bind（CTkSlider 在自己的 _draw 里会重新绑滚轮，覆盖掉我们），
+        而是给每个控件加一个排在最前面的 bindtag：handler 先执行并 return
+        "break"，后面控件自身的处理就不会再跑到。
+        """
+        scroll = getattr(self, "left_scroll", None)
+        if scroll is None:
+            return
+        canvas = scroll._parent_canvas
+        tag = self.LEFT_SCROLL_TAG
+
+        if not getattr(self, "_left_scroll_class_bound", False):
+            for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+                try:
+                    self.bind_class(tag, sequence,
+                                    lambda event, c=canvas: self._scroll_left(event, c))
+                except Exception:  # noqa: BLE001
+                    pass
+            # Tk 9 起，触控板两指滑动不再产生 MouseWheel，而是 TouchpadScroll
+            # （TIP 684）；不单独绑这个序列的话，Mac 触控板压根滚不动。
+            try:
+                self.bind_class(tag, "<TouchpadScroll>",
+                                lambda event, c=canvas: self._scroll_touchpad(event, c))
+            except Exception:  # noqa: BLE001 - Tk 8.6 没有这个事件
+                pass
+            self._left_scroll_class_bound = True
+
+        # 滚动区之外的区域（底部按钮、状态行、卡片边距）不属于滚动容器，
+        # CTk 的判定也不会认，单独用一个全局兜底：只要指针在左卡片里就滚。
+        if not getattr(self, "_left_fallback_bound", False):
+            for sequence, handler in (
+                ("<MouseWheel>", self._left_card_wheel),
+                ("<TouchpadScroll>", self._left_card_touchpad),
+            ):
+                try:
+                    self.bind_all(sequence, handler, add="+")
+                except Exception:  # noqa: BLE001 - 老 Tk 没有 TouchpadScroll
+                    pass
+            self._left_fallback_bound = True
+
+        stack = [scroll]
+        stack.extend(scroll.winfo_children())
+        while stack:
+            widget = stack.pop()
+            try:
+                stack.extend(widget.winfo_children())
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                tags = list(widget.bindtags())
+                if tag not in tags:
+                    widget.bindtags((tag, *tags))
+            except Exception:  # noqa: BLE001 - 极少数控件不让改 bindtags
+                continue
+
+    def _scroll_left(self, event, canvas):
+        """把滚轮事件换算成滚动单位的通用处理。"""
+        # macOS 的 <MouseWheel> 事件 num 是 '??'，不能直接 int()
+        def _int(value, default=0):
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return default
+
+        num = _int(getattr(event, "num", 0))
+        delta = _int(getattr(event, "delta", 0))
+        if not delta:                           # 部分平台/合成事件不带 delta
+            delta = -1 if num == 4 else 1
+        if num in (4, 5):                       # Linux 的滚轮是 Button-4/5
+            units = -1 if num == 4 else 1
+        elif sys.platform == "darwin":
+            units = -delta                      # 与 CTk 自带处理保持一致
+        else:
+            units = -_int(delta / 6) or (-1 if delta > 0 else 1)
+        canvas.yview_scroll(units, "units")
+        return "break"
+
+    @staticmethod
+    def _is_descendant(widget, root) -> bool:
+        """widget 是不是 root 自己或 root 的后代。"""
+        node = widget
+        while node is not None:
+            if node is root:
+                return True
+            node = getattr(node, "master", None)
+        return False
+
+    def _pointer_in_card_margin(self) -> bool:
+        """指针是否落在左卡片里、但在滚动区之外（底部按钮区、卡片边距）。"""
+        try:
+            widget = self.winfo_containing(self.winfo_pointerx(), self.winfo_pointery())
+        except Exception:  # noqa: BLE001
+            return False
+        if widget is None:
+            return False
+        if self._is_descendant(widget, self.left_scroll):
+            return False
+        return self._is_descendant(widget, self.left_panel)
+
+    def _left_card_wheel(self, event):
+        if not self._pointer_in_card_margin():
+            return None
+        return self._scroll_left(event, self.left_scroll._parent_canvas)
+
+    def _left_card_touchpad(self, event):
+        if not self._pointer_in_card_margin():
+            return None
+        return self._scroll_touchpad(event, self.left_scroll._parent_canvas)
+
+    def _scroll_touchpad(self, event, canvas):
+        """触控板两指滑动（Tk 9 的 TouchpadScroll）。
+
+        Δx/Δy 被打包在事件的 keycode 里，要用 `tk::PreciseScrollDeltas` 解开；
+        单位是像素，所以按像素滚（canvas 的 "units" 是 8px，直接换算会丢小步长，
+        慢慢滑会感觉「没反应」）。
+        """
+        try:
+            deltas = self.tk.splitlist(self.tk.call("tk::PreciseScrollDeltas", event.delta))
+            delta_y = int(deltas[1])
+        except Exception:  # noqa: BLE001 - 老 Tk 或事件格式异常
+            return "break"
+        if delta_y:
+            self._scroll_canvas_pixels(canvas, -delta_y)
+        return "break"
+
+    def _scroll_canvas_pixels(self, canvas, pixels: int) -> None:
+        """按像素移动画布，两端夹住不越界。"""
+        try:
+            box = canvas.bbox("all")
+            if not box:
+                return
+            total = box[3] - box[1]
+            visible = canvas.winfo_height()
+            if total <= visible:
+                return
+            top = canvas.canvasy(0) + pixels
+            top = max(0, min(top, total - visible))
+            canvas.yview_moveto(top / total)
+        except Exception:  # noqa: BLE001
+            pass
+
     def _step_title(self, parent, badge: str, title: str, subtitle: str) -> None:
         row = ctk.CTkFrame(parent, fg_color="transparent")
         row.pack(fill="x", pady=(11, 0))
@@ -1096,12 +1809,9 @@ class AwardStudio(ctk.CTk, _DnDWrapper):
         self.table_note = ctk.CTkLabel(head, text="点表头数字列选择排名依据",
                                        font=self.font_small, text_color=MUTED, anchor="w")
         self.table_note.grid(row=1, column=0, sticky="w")
-        self.sheet_menu = ctk.CTkOptionMenu(
-            head, values=["—"], width=self._px(168), height=self._px(28), corner_radius=8,
-            font=self.font_small, dropdown_font=self.font_small,
-            fg_color="#F2F4FC", button_color="#E3E7F6", button_hover_color="#D7DCF0",
-            text_color=INK, dropdown_fg_color=CARD, dropdown_text_color=INK,
-            dropdown_hover_color=PRIMARY_SOFT, command=self._on_sheet_change)
+        self.sheet_menu = Picker(head, ["—"], self._on_sheet_change,
+                                 width=self._px(170), height=self._px(27),
+                                 font=self.font_small, bg="#F7F9FF", border="#DFE5F2")
         self.sheet_menu.grid(row=0, column=1, sticky="e")
         self.sheet_menu.grid_remove()
 
@@ -1341,10 +2051,15 @@ class AwardStudio(ctk.CTk, _DnDWrapper):
         if self.tdoc_result is not None:
             self.tdoc_hint.configure(text=self.tdoc_result.describe(), text_color=SUCCESS)
             return
+        personal = str(prefs.load().get("tdoc_token") or "").strip()
+        if personal:
+            shown = f"{personal[:4]}…{personal[-4:]}" if len(personal) > 10 else "已填写"
+            self.tdoc_hint.configure(text=f"已连接（个人 Token {shown}）", text_color=SUCCESS)
+            return
         credentials = tdoc_auth.AppCredentials.load()
         if not credentials.configured:
             self.tdoc_hint.configure(
-                text="未内置应用凭证，填好设置文件后即可连接腾讯文档", text_color=WARNING)
+                text="未连接腾讯文档，点下面「连接腾讯文档…」粘贴个人 Token", text_color=WARNING)
             return
         tokens = tdoc_auth.TokenStore().load()
         if not tokens.present:
@@ -1461,12 +2176,8 @@ class AwardStudio(ctk.CTk, _DnDWrapper):
     def _connect_tencent(self) -> None:
         credentials = tdoc_auth.AppCredentials.load()
         if not credentials.configured:
-            messagebox.showinfo(
-                "还没有应用凭证",
-                "这个版本里没有内置腾讯文档应用凭证，需要先填一次：\n\n"
-                f"{prefs.settings_path()}\n\n"
-                "键名：tdoc_client_id、tdoc_client_secret、tdoc_redirect_uri",
-            )
+            # 个人主体没有 Client ID，只能填个人 Token
+            TencentTokenDialog(self, self._on_token_saved)
             return
         tokens = tdoc_auth.TokenStore().load()
         if tokens.present and not tokens.expired:
@@ -1478,68 +2189,7 @@ class AwardStudio(ctk.CTk, _DnDWrapper):
         except tdoc_auth.TencentAuthError as exc:
             messagebox.showerror("无法发起授权", str(exc))
             return
-
-        if credentials.redirect_uri.lower().startswith("https://127.0.0.1"):
-            self._authorize_via_local_server(credentials, url, state)
-        else:
-            self._authorize_via_paste(credentials, url, state)
-
-    def _authorize_via_local_server(self, credentials, url: str, state: str) -> None:
-        """本地起 HTTPS 端点收 code：浏览器授权完自动回来。"""
-        try:
-            server = tdoc_auth.LocalCallbackServer(prefs.settings_path().parent)
-            actual = server.start()
-        except (tdoc_auth.TencentAuthError, OSError) as exc:
-            self._log(f"本地回调不可用（{exc}），改用粘贴方式", "warn")
-            messagebox.showwarning("本地回调不可用", f"{exc}\n\n改为手动粘贴授权码。")
-            self._authorize_via_paste(credentials, url, state)
-            return
-        self._log(f"授权回调已监听 {actual}（浏览器可能提示证书不受信任，选择继续即可）", "muted")
-        tdoc_auth.open_in_browser(url)
-        self._refresh_tencent_hint("等待浏览器里完成授权…", PRIMARY)
-        threading.Thread(target=self._wait_local_callback, args=(server, credentials, state),
-                         daemon=True).start()
-
-    def _wait_local_callback(self, server, credentials, state: str) -> None:
-        try:
-            code, got_state = server.wait(180)
-        except tdoc_auth.TencentAuthError as exc:
-            self.ui_queue.put(("auth_err", str(exc), getattr(exc, "hint", "")))
-            return
-        self._finish_authorize(credentials, code, got_state, state)
-
-    def _authorize_via_paste(self, credentials, url: str, state: str) -> None:
-        """回调是固定 HTTPS 页时：浏览器跳过去后把链接粘回来。"""
-        tdoc_auth.open_in_browser(url)
-        raw = simpledialog.askstring(
-            "粘贴授权结果",
-            "浏览器里完成授权后，把地址栏整条链接复制粘贴到这里\n"
-            "（形如 https://…/callback?code=…&state=…）：",
-            parent=self,
-        )
-        if not raw:
-            return
-        try:
-            code, got_state = tdoc_auth.parse_callback(raw)
-        except tdoc_auth.TencentAuthError as exc:
-            messagebox.showerror("粘贴内容无法识别",
-                                 f"{exc}\n\n{getattr(exc, 'hint', '')}".strip())
-            return
-        threading.Thread(target=self._finish_authorize,
-                         args=(credentials, code, got_state, state), daemon=True).start()
-
-    def _finish_authorize(self, credentials, code: str, got_state: str, state: str) -> None:
-        if got_state and state and got_state != state:
-            self.ui_queue.put(("auth_err", "state 不匹配，授权可能被篡改",
-                               "请重新点「连接腾讯文档」"))
-            return
-        try:
-            tokens = tdoc_auth.exchange_code(credentials, code)
-        except tdoc_auth.TencentAuthError as exc:
-            self.ui_queue.put(("auth_err", str(exc), getattr(exc, "hint", "")))
-            return
-        tdoc_auth.TokenStore().save(tokens)
-        self.ui_queue.put(("auth_ok", tokens))
+        TencentAuthDialog(self, credentials, url, state, self._on_auth_ok)
 
     def _on_auth_ok(self, tokens) -> None:
         self._refresh_tencent_hint()
@@ -1547,6 +2197,14 @@ class AwardStudio(ctk.CTk, _DnDWrapper):
         if not (self.tdoc_entry.get().strip() or self.tdoc_url):
             return
         if messagebox.askyesno("已连接", f"{tokens.describe()}\n\n现在拉取这份表格吗？"):
+            self._load_from_tencent()
+
+    def _on_token_saved(self) -> None:
+        self._refresh_tencent_hint("已保存个人 Token", SUCCESS)
+        self._log("腾讯文档个人 Token 已保存", "ok")
+        if not (self.tdoc_entry.get().strip() or self.tdoc_url):
+            return
+        if messagebox.askyesno("已保存", "现在拉取这份表格吗？"):
             self._load_from_tencent()
 
     # -------------------------------------------------------------- 文件拖放
@@ -1564,8 +2222,7 @@ class AwardStudio(ctk.CTk, _DnDWrapper):
         self.drop_note = ""
         if sys.platform == "win32" and self._enable_win32_drop():
             self.drop_backend = "win32"
-            return
-        if self._enable_tkdnd_drop():
+        elif self._enable_tkdnd_drop():
             self.drop_backend = "tkdnd"
         elif self.drop_note:
             self._log(f"拖放未启用：{self.drop_note}（可以用按钮选择文件）", "warn")
@@ -1863,21 +2520,20 @@ class AwardStudio(ctk.CTk, _DnDWrapper):
             ctk.CTkLabel(row, text=rule.key, width=self._px(52), anchor="w",
                          font=self.font_small,
                          text_color=WARNING if changed else INK).pack(side="left")
-            menu = ctk.CTkOptionMenu(
-                row, values=list(field_rules.SOURCE_LABELS.values()),
-                width=self._px(76), height=self._px(26), font=self.font_small,
-                dropdown_font=self.font_small, corner_radius=7,
-                fg_color="#F8FAFD", button_color="#E8ECF5",
-                button_hover_color="#DDE3EF", text_color=INK,
-                command=lambda value, r=rule: self._on_source_change(r, value),
+            menu = Picker(
+                row, list(field_rules.SOURCE_LABELS.values()),
+                lambda value, r=rule: self._on_source_change(r, value),
+                rule.source_label, width=self._px(78), height=self._px(26),
+                font=self.font_small, bg="#F8FAFD", border="#E8ECF5",
             )
-            menu.set(rule.source_label)
             menu.pack(side="left", padx=(2, 4))
 
             holder = ctk.CTkFrame(row, fg_color="transparent")
             holder.pack(side="left", fill="x", expand=True)
             self._build_mapping_value(holder, rule)
         self._sync_mapping_visibility()
+        # 映射行也是重建出来的，滚轮绑定要补上
+        self._bind_left_scroll()
 
     def _build_mapping_value(self, holder, rule) -> None:
         height = self._px(26)
@@ -1897,14 +2553,13 @@ class AwardStudio(ctk.CTk, _DnDWrapper):
             labels = [self._column_label(name) for name in names]
             if rule.value not in names:
                 rule.value = field_rules.column_for(rule.key, names) or names[0]
-            menu = ctk.CTkOptionMenu(
-                holder, values=labels, font=self.font_small, dropdown_font=self.font_small,
-                height=height, corner_radius=7, fg_color="#F8FAFD",
-                button_color="#E8ECF5", button_hover_color="#DDE3EF", text_color=INK,
-                command=lambda label, r=rule, ns=names, ls=labels: self._set_rule_value(
+            menu = Picker(
+                holder, labels,
+                lambda label, r=rule, ns=names, ls=labels: self._set_rule_value(
                     r, ns[ls.index(label)]),
+                self._column_label(rule.value), width=self._px(120), height=height,
+                font=self.font_small, bg="#F8FAFD", border="#E8ECF5",
             )
-            menu.set(self._column_label(rule.value))
             menu.pack(fill="x")
             return
 
@@ -2063,6 +2718,9 @@ class AwardStudio(ctk.CTk, _DnDWrapper):
                 lambda *_a, it=item, var=count_var: self._update_award(it, "count", var.get()),
             )
             self._award_rows.append((row, item, (handle, entry, count_entry, del_btn_widget)))
+
+        # 奖项行是重建出来的，滚轮绑定要补上
+        self._bind_left_scroll()
 
     # ---------------------------------------------------------- 拖动排序
     def _begin_drag(self, event, item: dict) -> None:
@@ -2792,13 +3450,6 @@ class AwardStudio(ctk.CTk, _DnDWrapper):
         elif kind == "cloud_err":
             _, error, hint, refresh = message
             self._fail_tencent(error, hint, refresh)
-        elif kind == "auth_ok":
-            self._on_auth_ok(message[1])
-        elif kind == "auth_err":
-            self._refresh_tencent_hint("授权失败，请重试", DANGER)
-            self._log(f"授权失败：{message[1]}", "err")
-            messagebox.showerror("授权失败",
-                                 message[1] + (f"\n\n{message[2]}" if message[2] else ""))
 
     def _finish(self, created: list[Path], failures: list[str], out_dir: Path) -> None:
         self.busy = False
@@ -2868,6 +3519,13 @@ class AwardStudio(ctk.CTk, _DnDWrapper):
             "关掉「设置奖项等级」则只排名次，奖状里不填奖项。\n"
             "5. 选择输出目录，默认放在成绩表同级的 output/奖状，可勾选额外生成合并版。\n"
             "6. 点「生成奖状」，每人一份 Word，文件名形如 01_张三_一等奖.docx。\n\n"
+            "腾讯文档（在线成绩表）\n"
+            "把在线表格链接粘到「成绩表」下面的输入框，点「载入」就能读；云端改了分数，点旁边的 ↻ 重新拉一遍。\n"
+            "第一次用要先连接：点「连接腾讯文档…」。\n"
+            "   · 个人账号（没有企业应用）：弹窗里粘贴个人 Token——"
+            "浏览器登录 docs.qq.com → 文档列表页右上角「更多操作 → 开放平台」→「龙虾专用入口」里复制\n"
+            "   · 企业应用：弹窗里会出现二维码，手机微信或 QQ 扫码授权即可\n"
+            "软件对云端表格只读，不会写回任何内容；目前只支持在线表格（sheet）。\n\n"
             "界面字号\n"
             "右上角中间的数字可以直接改：点进去输入 10–28 之间的数值，回车生效；"
             "也可以点 A- / A+ 逐级调整，或用键盘上下键微调。\n"
@@ -2912,7 +3570,106 @@ class AwardStudio(ctk.CTk, _DnDWrapper):
         self._sync_buttons()
 
 
+def headless_sync(url: str) -> int:
+    """不开界面，只跑一次腾讯文档同步（排障与打包验证用）。"""
+    print(f"同步：{url}")
+    try:
+        result = sync_to_cache(url, cache_dir=default_cache_dir())
+    except TencentDocsError as exc:
+        print(f"失败：{exc}")
+        if getattr(exc, "hint", ""):
+            print(f"建议：{exc.hint}")
+        return 1
+    except Exception as exc:  # noqa: BLE001
+        print(f"失败：{type(exc).__name__}: {exc}")
+        return 1
+    print(f"完成：{result.describe()}")
+    print(f"缓存：{result.xlsx_path}")
+    try:
+        players, warnings, report = load_players(result.xlsx_path)
+        print(f"解析：{len(players)} 行 · {report.describe()}")
+        for warning in warnings[:3]:
+            print(f"  ! {warning}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"解析失败：{exc}")
+        return 1
+    return 0
+
+
+def scroll_diagnostics() -> int:
+    """把左侧面板的滚动状态打印/写文件，用于排查打包版的滚轮问题。"""
+    window = AwardStudio()
+    window.update()
+    canvas = window.left_scroll._parent_canvas
+    lines = [
+        f"版本 {APP_VERSION}",
+        f"Tk {window.tk.call('info', 'patchlevel')}",
+        f"frozen {getattr(sys, 'frozen', False)}",
+        f"window_scaling {window._get_window_scaling()}",
+        f"scrollregion {canvas.cget('scrollregion')}",
+        f"canvas_h {canvas.winfo_height()} inner_h {window.left_scroll.winfo_height()}",
+        f"yscrollincrement {canvas.cget('yscrollincrement')}",
+        f"bindtag {window.LEFT_SCROLL_TAG} 已挂到输入框: "
+        f"{window.LEFT_SCROLL_TAG in window.tdoc_entry.bindtags()}",
+    ]
+    targets = [("按钮", window.excel_btn), ("输入框", window.tdoc_entry)]
+    if window.slider.winfo_ismapped():
+        # 名额滑块只在「关闭奖项等级」时显示，没显示就不测（否则事件根本没接收者）
+        targets.append(("滑块", window.slider._canvas))
+    else:
+        lines.append("滑块：当前未显示（奖项模式开启），跳过")
+    for name, widget in targets:
+        canvas.yview_moveto(0)
+        window.update()
+        before = canvas.yview()[0]
+        try:
+            widget.event_generate("<MouseWheel>", delta=-40, when="now")
+            window.update()
+            after = canvas.yview()[0]
+            lines.append(f"{name}(滚轮): {before:.3f} -> {after:.3f} "
+                         f"{'滚动了' if after > before else '不动'}")
+        except Exception as exc:  # noqa: BLE001
+            lines.append(f"{name}(滚轮): 事件发送失败 {exc}")
+
+    # 触控板：Tk 9 用的是 TouchpadScroll，Δy 打包在 delta 的低 16 位
+    packed = (-40) & 0xFFFF
+    for name, widget in targets[:2]:
+        canvas.yview_moveto(0)
+        window.update()
+        before = canvas.yview()[0]
+        try:
+            widget.event_generate("<TouchpadScroll>", delta=packed, when="now")
+            window.update()
+            after = canvas.yview()[0]
+            lines.append(f"{name}(触控板): {before:.3f} -> {after:.3f} "
+                         f"{'滚动了' if after > before else '不动'}")
+        except Exception as exc:  # noqa: BLE001
+            lines.append(f"{name}(触控板): 事件发送失败 {exc}")
+    text = "\n".join(lines)
+    print(text)
+    try:
+        target = Path.home() / "award-scroll-diag.txt"
+        target.write_text(text, encoding="utf-8")
+        print(f"\n已写入 {target}")
+    except OSError:
+        pass
+    window.destroy()
+    return 0
+
+
 def main() -> None:
+    if "--diag-scroll" in sys.argv:
+        raise SystemExit(scroll_diagnostics())
+
+    if "--sync" in sys.argv:
+        index = sys.argv.index("--sync")
+        try:
+            target = sys.argv[index + 1]
+        except IndexError:
+            print("用法：AwardStudio --sync <腾讯文档链接>")
+            raise SystemExit(2) from None
+        raise SystemExit(headless_sync(target))
+
     demo = "--demo" in sys.argv or "-d" in sys.argv
     app = AwardStudio(demo=demo)
     app.mainloop()

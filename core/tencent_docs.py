@@ -183,10 +183,34 @@ class McpTokens:
     oauth: str = ""
     oneid: str = ""
     api_base: str = ""
+    # 个人 Token（文档列表页 → 更多操作 → 开放平台 拿到的那个）
+    # 官方示例是直接放在 Authorization 里，不带 Bearer 前缀
+    raw_auth: bool = False
 
     @property
     def present(self) -> bool:
         return bool(self.oauth or self.oneid)
+
+
+class PersonalTokenProvider:
+    """个人开发者 Token：只读本机设置，不需要应用凭证。
+
+    个人主体在开放平台拿不到 Client ID，只能拿一个长期 Token
+    （docs.qq.com → 更多操作 → 开放平台 → 龙虾专用入口）。
+    """
+
+    def __init__(self, token: str = "") -> None:
+        self._token = (token or "").strip()
+        if not self._token:
+            from . import settings as prefs
+
+            self._token = str(prefs.load().get("tdoc_token") or "").strip()
+
+    def tokens(self) -> McpTokens:
+        if not self._token:
+            raise AuthRequired("还没有填写个人 Token",
+                               "点「连接腾讯文档…」粘贴 Token 即可")
+        return McpTokens(oauth=self._token, raw_auth=True)
 
 
 class EnvTokenProvider:
@@ -209,36 +233,59 @@ class HostTokenProvider:
     宿主把 `CODEBUDDY_MCP_CONFIG` 塞进子进程环境，里面是本机 MCP 网关的地址
     和一组必需的认证头；网关的 `/internal/tencent-docs/tokens` 会把当前用户
     的腾讯文档票据发下来。票据只在内存里放几分钟，不落盘。
+
+    打包成 .app 后从 Finder 启动是没有这个环境变量的，这时读同目录的
+    `tdoc_host.json`（由 `tools/make_host_bridge.py` 生成），仅用于本机测试。
     """
 
     TTL = 240  # 秒
 
-    def __init__(self) -> None:
+    def __init__(self, config_path: str | Path | None = None) -> None:
         self._cache: tuple[float, McpTokens] | None = None
+        self.config_path = Path(config_path) if config_path else bridge_path()
+
+    def _read_config(self) -> dict:
+        """优先宿主注入的环境变量，其次本机联调文件。"""
+        raw = os.environ.get("CODEBUDDY_MCP_CONFIG", "")
+        if not raw:
+            path = self.config_path
+            if path is None or not path.exists():
+                return {}
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return {}
+            return data if isinstance(data, dict) else {}
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _gateway(self) -> tuple[str, dict]:
+        data = self._read_config()
+        servers = data.get("mcpServers") or {}
+        server = servers.get("connector-proxy") or servers.get("workbuddy") or {}
+        if not server.get("url") and data.get("gateway_url"):
+            server = {"url": data["gateway_url"], "headers": data.get("headers") or {}}
+        gateway = str(server.get("url") or "")
+        headers = {name: value
+                   for name, value in (server.get("headers") or {}).items()
+                   if isinstance(name, str) and isinstance(value, str) and value}
+        if not gateway.endswith("/mcp") or not any(
+                name.lower() == "authorization" for name in headers):
+            raise AuthRequired(
+                "没有可用的腾讯文档凭证",
+                "请在软件里点「连接腾讯文档」完成授权；"
+                "本机联调可运行 tools/make_host_bridge.py 借用 WorkBuddy 的票据",
+            )
+        return gateway, headers
 
     def tokens(self) -> McpTokens:
         if self._cache and time.time() - self._cache[0] < self.TTL:
             return self._cache[1]
 
-        raw = os.environ.get("CODEBUDDY_MCP_CONFIG", "")
-        if not raw:
-            raise AuthRequired(
-                "没有找到腾讯文档的登录票据",
-                "请在软件里点「连接腾讯文档」完成授权；"
-                "或在 WorkBuddy 会话里启动本程序以便复用宿主票据",
-            )
-        try:
-            servers = (json.loads(raw).get("mcpServers") or {})
-        except (ValueError, AttributeError) as exc:
-            raise AuthRequired("宿主配置无法解析", "请在软件里重新连接腾讯文档") from exc
-        server = servers.get("connector-proxy") or servers.get("workbuddy") or {}
-        gateway = str(server.get("url") or "")
-        headers = {k: v for k, v in (server.get("headers") or {}).items()
-                   if isinstance(k, str) and isinstance(v, str) and v}
-        if not gateway.endswith("/mcp") or not any(
-                name.lower() == "authorization" for name in headers):
-            raise AuthRequired("宿主网关信息不完整", "请在 WorkBuddy 里重新授权腾讯文档")
-
+        gateway, headers = self._gateway()
         request = urllib.request.Request(
             gateway + "/internal/tencent-docs/tokens", headers=headers, method="GET")
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -246,7 +293,8 @@ class HostTokenProvider:
             with opener.open(request, timeout=10) as response:
                 data = json.loads(response.read().decode("utf-8"))
         except Exception as exc:  # noqa: BLE001
-            raise AuthRequired(f"取票据失败：{exc}", "请在 WorkBuddy 里重新授权腾讯文档") from exc
+            raise AuthRequired(f"取票据失败：{exc}",
+                               "请在软件里重新连接腾讯文档，或重跑 make_host_bridge.py") from exc
 
         personal = data.get("personal") or {}
         enterprise = data.get("enterprise") or {}
@@ -261,6 +309,13 @@ class HostTokenProvider:
                                "请在 WorkBuddy 里重新授权腾讯文档")
         self._cache = (time.time(), tokens)
         return tokens
+
+
+def bridge_path() -> Path:
+    """本机联调用的网关凭据文件（由 tools/make_host_bridge.py 生成，不入库）。"""
+    from . import settings as prefs
+
+    return prefs.settings_path().parent / "tdoc_host.json"
 
 
 # ---------------------------------------------------------------- 通道
@@ -322,13 +377,29 @@ class McpTransport(Transport):
             "method": "tools/call",
             "params": {"name": tool, "arguments": arguments},
         }
+        # Authorization 的写法有两种流派：宿主的 OAuth 票是 `Bearer xxx`，
+        # 个人 Token 在官方示例里是直接放 token。先按提供方的约定来，
+        # 401 再换另一种试一次（只多一次请求，能自愈）。
+        styles = [tokens.raw_auth]
+        if tokens.oauth:
+            styles.append(not tokens.raw_auth)
+        last_error: TencentDocsError | None = None
+        for raw in styles:
+            try:
+                return self._post(payload, tokens, raw)
+            except AuthRequired as exc:
+                last_error = exc
+                continue
+        raise last_error or AuthRequired("授权无效")
+
+    def _post(self, payload: dict, tokens: McpTokens, raw: bool) -> dict:
         headers = {
             "Content-Type": "application/json",
             "Accept": "application/json, text/event-stream",
             "User-Agent": "AwardStudio",
         }
         if tokens.oauth:
-            headers["Authorization"] = f"Bearer {tokens.oauth}"
+            headers["Authorization"] = tokens.oauth if raw else f"Bearer {tokens.oauth}"
         if tokens.oneid:
             headers["X-Oneid-Access-Token"] = tokens.oneid
 
@@ -337,7 +408,7 @@ class McpTransport(Transport):
             headers=headers, method="POST")
         try:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                raw = response.read().decode("utf-8", errors="replace")
+                raw_text = response.read().decode("utf-8", errors="replace")
                 content_type = response.headers.get("Content-Type", "")
         except urllib.error.HTTPError as exc:
             body = ""
@@ -352,8 +423,8 @@ class McpTransport(Transport):
             raise NetworkError(f"连不上腾讯文档：{exc}") from exc
 
         if "text/event-stream" in content_type:
-            raw = _extract_sse(raw)
-        return _parse_rpc(raw)
+            raw_text = _extract_sse(raw_text)
+        return _parse_rpc(raw_text)
 
     @staticmethod
     def _raise_http(status: int, body: str) -> None:
@@ -773,6 +844,14 @@ def build_transport() -> Transport:
             access_token=fresh.access_token,
         )
 
+    # 个人开发者：只有 Token，没有 Client ID（个人主体拿不到第三方应用）
+    personal = PersonalTokenProvider()
+    try:
+        if personal.tokens().present:
+            return McpTransport(personal)
+    except AuthRequired:
+        pass
+
     host = HostTokenProvider()
     try:
         if host.tokens().present:
@@ -787,4 +866,5 @@ def build_transport() -> Transport:
         raise AuthRequired("还没有授权腾讯文档", "请点「连接腾讯文档」用你的账号扫码授权")
     raise AuthRequired("没有可用的腾讯文档凭证",
                        "请点「连接腾讯文档」完成授权；"
-                       "若软件未内置应用凭证，需要先在设置里填 Client ID / Secret")
+                       "若软件未内置应用凭证，需要先在设置里填 Client ID / Secret；"
+                       "本机联调可运行 tools/make_host_bridge.py")

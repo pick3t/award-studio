@@ -8,11 +8,15 @@ venv/
 # 打包产物
 build/
 dist/
+dist-old*/
+.old-builds/
 *.spec
+.pyi-cache/
 
 # 运行输出
 output/
 diag.txt
+award-scroll-diag.txt
 
 # 真实成绩单（含选手姓名，不入库）
 samples/真实场地/

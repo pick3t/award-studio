@@ -3,6 +3,9 @@ name: Build Release
 on:
   push:
     tags: ["v*"]
+    # 特性分支也跑一遍构建，方便在合并前验证三个平台能不能编出来
+    # （release 任务有 tag 判断，分支构建不会发版）
+    branches: ["feat/**"]
   workflow_dispatch:
 
 jobs:
