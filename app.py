@@ -10,6 +10,7 @@ from __future__ import annotations
 import calendar
 import os
 import queue
+import secrets
 import subprocess
 import re
 import sys
@@ -17,7 +18,7 @@ import threading
 import time
 from datetime import date, datetime
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 if sys.platform == "win32":
     # 让 Windows 按系统缩放渲染，避免高分屏下界面被截断
@@ -43,7 +44,7 @@ DATA_DIR = Path(sys.executable).parent if getattr(sys, "frozen", False) else BAS
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
-APP_VERSION = "1.4.1"
+APP_VERSION = "1.5.0"
 
 from core.certificate import (  # noqa: E402
     CertificateContext,
@@ -55,6 +56,7 @@ from core.certificate import (  # noqa: E402
 )
 from core import fields as field_rules  # noqa: E402
 from core import settings as prefs  # noqa: E402
+from core import tdoc_auth  # noqa: E402
 from core.excel_reader import ExcelParseError, list_sheets, load_players  # noqa: E402
 from core.ranking import (  # noqa: E402
     RankedEntry,
@@ -64,6 +66,11 @@ from core.ranking import (  # noqa: E402
     rank_players,
     safe_filename,
     winners_of,
+)
+from core.tencent_docs import (  # noqa: E402
+    TencentDocsError,
+    default_cache_dir,
+    sync_to_cache,
 )
 
 # ------------------------------------------------------------------ 设计令牌
@@ -331,6 +338,10 @@ class AwardStudio(ctk.CTk, _DnDWrapper):
         self.column_names: list[str] = []
         self.score_columns: list[str] = []
         self.score_column_names: list[str] = []
+        # 腾讯文档：最近一次同步的结果与链接（链接会记到设置里，下次自动填回）
+        self.tdoc_url: str = str(saved.get("tdoc_url") or "")
+        self.tdoc_result = None
+        self.tdoc_busy = False
 
         self.awards = self._parse_awards(saved.get("awards"))
         self.award_mode = bool(saved.get("award_mode", True))
@@ -350,6 +361,7 @@ class AwardStudio(ctk.CTk, _DnDWrapper):
 
         self._setup_style()
         self._build()
+        self._restore_tencent_ui()
         self._refresh_table()
         if self.text_scale != 1.0:
             self._apply_text_scale()
@@ -357,6 +369,8 @@ class AwardStudio(ctk.CTk, _DnDWrapper):
         self._sync_buttons()
 
         self._enable_file_drop()
+        # 队列泵常驻：生成、腾讯文档同步都靠它把后台结果送回界面
+        self.after(120, self._poll)
 
         if demo:
             self.after(300, self._load_demo)
@@ -814,6 +828,8 @@ class AwardStudio(ctk.CTk, _DnDWrapper):
         data["award_mode"] = bool(self.award_switch.get())
         data["field_rules"] = [rule.to_dict() for rule in self.field_rules]
         data["awards"] = [{"name": item["name"], "count": item["count"]} for item in self.awards]
+        if self.tdoc_url:
+            data["tdoc_url"] = self.tdoc_url
         prefs.save(data)
 
     def _build_left(self, parent) -> None:
@@ -861,6 +877,40 @@ class AwardStudio(ctk.CTk, _DnDWrapper):
         self.excel_hint = ctk.CTkLabel(wrap, text="支持 .xlsx / .xlsm，也可直接把文件拖进窗口", font=self.font_small,
                                        text_color=MUTED, anchor="w", justify="left")
         self.excel_hint.pack(fill="x")
+
+        # ①-b 腾讯文档：粘贴链接就能拉表，右侧 ↻ 重新拉一次
+        cloud_row = ctk.CTkFrame(wrap, fg_color="transparent")
+        cloud_row.pack(fill="x", pady=(6, 0))
+        self.tdoc_entry = ctk.CTkEntry(
+            cloud_row, height=30, corner_radius=9, border_width=1, border_color=LINE,
+            fg_color="#FFFFFF", text_color=INK, font=self.font_small,
+            placeholder_text="粘贴腾讯文档链接…",
+        )
+        self.tdoc_entry.pack(side="left", fill="x", expand=True)
+        self.tdoc_load_btn = ctk.CTkButton(
+            cloud_row, text="载入", width=46, height=30, corner_radius=9,
+            fg_color=PRIMARY_SOFT, hover_color="#E3E7FF", text_color=PRIMARY,
+            font=self.font_small, command=self._load_from_tencent,
+        )
+        self.tdoc_load_btn.pack(side="left", padx=(6, 0))
+        self.tdoc_refresh_btn = ctk.CTkButton(
+            cloud_row, text="↻", width=32, height=30, corner_radius=9,
+            fg_color=PRIMARY, hover_color=PRIMARY_HOVER, text_color="#FFFFFF",
+            font=self._mkfont("tdoc_refresh", 13, "bold"),
+            command=self._refresh_tencent,
+        )
+        self.tdoc_refresh_btn.pack(side="left", padx=(4, 0))
+        self.tdoc_hint = ctk.CTkLabel(
+            wrap, text="", font=self.font_small, text_color=MUTED,
+            anchor="w", justify="left", wraplength=286,
+        )
+        self.tdoc_hint.pack(fill="x", pady=(2, 0))
+        self.tdoc_auth_btn = ctk.CTkButton(
+            wrap, text="连接腾讯文档…", height=22, fg_color="transparent",
+            hover_color="#F1F4FA", text_color=MUTED, font=self.font_small,
+            anchor="w", width=90, command=self._connect_tencent,
+        )
+        self.tdoc_auth_btn.pack(anchor="w")
 
         # ② 奖状模板
         self._step_title(wrap, "②", "奖状模板", "Word 模板中用 {{姓名}}、{{名次}} 占位")
@@ -1118,7 +1168,7 @@ class AwardStudio(ctk.CTk, _DnDWrapper):
         if path:
             self._load_excel(Path(path))
 
-    def _load_excel(self, path: Path) -> None:
+    def _load_excel(self, path: Path, label: str | None = None) -> None:
         """打开工作簿：列出全部工作表，自动选第一个能读出选手的。"""
         try:
             sheets = list_sheets(path)
@@ -1132,7 +1182,7 @@ class AwardStudio(ctk.CTk, _DnDWrapper):
 
         self.excel_path = path
         self.sheet_names = sheets
-        self.excel_btn.configure(text=short(path.name, 24), text_color=INK)
+        self.excel_btn.configure(text=short(label or path.name, 24), text_color=INK)
         self._render_sheet_menu()
 
         errors: list[str] = []
@@ -1274,6 +1324,230 @@ class AwardStudio(ctk.CTk, _DnDWrapper):
         self.mapping_open = True
         self._refresh_field_rules()
         self._sync_buttons()
+
+    # -------------------------------------------------------------- 腾讯文档
+    def _restore_tencent_ui(self) -> None:
+        """启动时把上次的链接填回输入框，并刷新授权状态。"""
+        if self.tdoc_url:
+            self.tdoc_entry.delete(0, "end")
+            self.tdoc_entry.insert(0, self.tdoc_url)
+        self._refresh_tencent_hint()
+
+    def _refresh_tencent_hint(self, text: str = "", color: str | None = None) -> None:
+        """状态行：优先显示本次同步结果，其次显示授权状态。"""
+        if text:
+            self.tdoc_hint.configure(text=text, text_color=color or MUTED)
+            return
+        if self.tdoc_result is not None:
+            self.tdoc_hint.configure(text=self.tdoc_result.describe(), text_color=SUCCESS)
+            return
+        credentials = tdoc_auth.AppCredentials.load()
+        if not credentials.configured:
+            self.tdoc_hint.configure(
+                text="未内置应用凭证，填好设置文件后即可连接腾讯文档", text_color=WARNING)
+            return
+        tokens = tdoc_auth.TokenStore().load()
+        if not tokens.present:
+            self.tdoc_hint.configure(
+                text="未连接腾讯文档，点下面「连接腾讯文档…」扫码授权", text_color=WARNING)
+            return
+        self.tdoc_hint.configure(
+            text=tokens.describe(),
+            text_color=SUCCESS if not tokens.expired else WARNING)
+
+    def _tencent_link(self) -> str:
+        text = self.tdoc_entry.get().strip()
+        return text or self.tdoc_url
+
+    def _load_from_tencent(self) -> None:
+        link = self._tencent_link()
+        if not link:
+            messagebox.showinfo("还没有链接", "先把腾讯文档链接粘贴到输入框里。")
+            return
+        self._start_tencent_sync(link, refresh=False)
+
+    def _refresh_tencent(self) -> None:
+        """↻：重新拉一遍云端表格；已经载入过名单时保留勾选的人。"""
+        link = self._tencent_link()
+        if not link:
+            messagebox.showinfo("还没有链接", "先把腾讯文档链接粘贴到输入框里。")
+            return
+        self._start_tencent_sync(link, refresh=bool(self.players))
+
+    def _start_tencent_sync(self, link: str, refresh: bool) -> None:
+        if self.tdoc_busy:
+            return
+        self.tdoc_busy = True
+        self.tdoc_load_btn.configure(state="disabled")
+        self.tdoc_refresh_btn.configure(state="disabled", text="…")
+        self._refresh_tencent_hint("正在从腾讯文档拉取…", PRIMARY)
+        self._log(f"{'刷新' if refresh else '载入'}腾讯文档：{link}", "info")
+        threading.Thread(target=self._tencent_worker, args=(link, refresh),
+                         daemon=True).start()
+
+    def _tencent_worker(self, link: str, refresh: bool) -> None:
+        try:
+            result = sync_to_cache(link, cache_dir=default_cache_dir())
+        except TencentDocsError as exc:
+            self.ui_queue.put(("cloud_err", str(exc), getattr(exc, "hint", ""), refresh))
+            return
+        except Exception as exc:  # noqa: BLE001 - 兜底，避免线程里静默崩掉
+            self.ui_queue.put(("cloud_err", f"{type(exc).__name__}: {exc}", "", refresh))
+            return
+        self.ui_queue.put(("cloud", result, refresh))
+
+    def _finish_tencent(self, result, refresh: bool) -> None:
+        self.tdoc_busy = False
+        self.tdoc_result = result
+        self.tdoc_url = result.url or self.tdoc_url
+        self.tdoc_entry.delete(0, "end")
+        self.tdoc_entry.insert(0, self.tdoc_url)
+        self.tdoc_load_btn.configure(state="normal")
+        self.tdoc_refresh_btn.configure(state="normal", text="↻")
+        self._save_settings()
+
+        if refresh and self.players:
+            self._apply_refreshed_sheet()
+        else:
+            self._load_excel(result.xlsx_path, label="腾讯文档 · 成绩表")
+        self._refresh_tencent_hint()
+        self._log(f"腾讯文档已同步：{result.describe()}", "ok")
+
+    def _fail_tencent(self, message: str, hint: str, refresh: bool) -> None:
+        self.tdoc_busy = False
+        self.tdoc_load_btn.configure(state="normal")
+        self.tdoc_refresh_btn.configure(state="normal", text="↻")
+        self._refresh_tencent_hint(f"拉取失败：{message}", DANGER)
+        self._log(f"腾讯文档拉取失败：{message}", "err")
+        # 刷新失败时不动当前名单，避免把裁判正在用的数据冲掉
+        if not (refresh and self.players):
+            messagebox.showerror("拉取失败", message + (f"\n\n{hint}" if hint else ""))
+
+    def _apply_refreshed_sheet(self) -> None:
+        """刷新后：沿用当前工作表、勾选的评判列，以及点选过的人（按姓名对齐）。"""
+        path = Path(self.tdoc_result.xlsx_path)
+        name_by_row = {p.row: p.name for p in self.players}
+        keep_names = {name_by_row[row] for row in self.picked if row in name_by_row}
+
+        try:
+            sheets = list_sheets(path)
+        except Exception as exc:  # noqa: BLE001
+            self._log(f"刷新后打不开缓存文件：{exc}", "err")
+            return
+        if not sheets:
+            self._log("刷新后工作簿里没有工作表", "err")
+            return
+
+        self.excel_path = path
+        self.sheet_names = sheets
+        self._render_sheet_menu()
+        target = self.current_sheet if self.current_sheet in sheets else sheets[0]
+        if not self._apply_sheet(target, keep_columns=True, quiet=True):
+            self._log(f"刷新后读取「{target}」失败：{self._last_sheet_error}", "err")
+            return
+        self.excel_btn.configure(text="腾讯文档 · 成绩表", text_color=INK)
+
+        if keep_names:
+            # 行号会随插行/删行变化，所以按姓名重新对齐勾选
+            self.picked = {p.row for p in self.players if p.name in keep_names}
+            self.filter_on = bool(self.picked)
+            self._refresh_pick_marks()
+            self._recalculate(keep_log=True)
+        missing = keep_names - {p.name for p in self.players}
+        if missing:
+            self._log(f"刷新后这 {len(missing)} 人已不在表里：{'、'.join(sorted(missing)[:5])}", "warn")
+
+    # -------------------------------------------------------------- 授权
+    def _connect_tencent(self) -> None:
+        credentials = tdoc_auth.AppCredentials.load()
+        if not credentials.configured:
+            messagebox.showinfo(
+                "还没有应用凭证",
+                "这个版本里没有内置腾讯文档应用凭证，需要先填一次：\n\n"
+                f"{prefs.settings_path()}\n\n"
+                "键名：tdoc_client_id、tdoc_client_secret、tdoc_redirect_uri",
+            )
+            return
+        tokens = tdoc_auth.TokenStore().load()
+        if tokens.present and not tokens.expired:
+            if not messagebox.askyesno("已连接", f"{tokens.describe()}\n要重新授权一次吗？"):
+                return
+        state = secrets.token_hex(8)
+        try:
+            url = tdoc_auth.authorize_url(credentials, state)
+        except tdoc_auth.TencentAuthError as exc:
+            messagebox.showerror("无法发起授权", str(exc))
+            return
+
+        if credentials.redirect_uri.lower().startswith("https://127.0.0.1"):
+            self._authorize_via_local_server(credentials, url, state)
+        else:
+            self._authorize_via_paste(credentials, url, state)
+
+    def _authorize_via_local_server(self, credentials, url: str, state: str) -> None:
+        """本地起 HTTPS 端点收 code：浏览器授权完自动回来。"""
+        try:
+            server = tdoc_auth.LocalCallbackServer(prefs.settings_path().parent)
+            actual = server.start()
+        except (tdoc_auth.TencentAuthError, OSError) as exc:
+            self._log(f"本地回调不可用（{exc}），改用粘贴方式", "warn")
+            messagebox.showwarning("本地回调不可用", f"{exc}\n\n改为手动粘贴授权码。")
+            self._authorize_via_paste(credentials, url, state)
+            return
+        self._log(f"授权回调已监听 {actual}（浏览器可能提示证书不受信任，选择继续即可）", "muted")
+        tdoc_auth.open_in_browser(url)
+        self._refresh_tencent_hint("等待浏览器里完成授权…", PRIMARY)
+        threading.Thread(target=self._wait_local_callback, args=(server, credentials, state),
+                         daemon=True).start()
+
+    def _wait_local_callback(self, server, credentials, state: str) -> None:
+        try:
+            code, got_state = server.wait(180)
+        except tdoc_auth.TencentAuthError as exc:
+            self.ui_queue.put(("auth_err", str(exc), getattr(exc, "hint", "")))
+            return
+        self._finish_authorize(credentials, code, got_state, state)
+
+    def _authorize_via_paste(self, credentials, url: str, state: str) -> None:
+        """回调是固定 HTTPS 页时：浏览器跳过去后把链接粘回来。"""
+        tdoc_auth.open_in_browser(url)
+        raw = simpledialog.askstring(
+            "粘贴授权结果",
+            "浏览器里完成授权后，把地址栏整条链接复制粘贴到这里\n"
+            "（形如 https://…/callback?code=…&state=…）：",
+            parent=self,
+        )
+        if not raw:
+            return
+        try:
+            code, got_state = tdoc_auth.parse_callback(raw)
+        except tdoc_auth.TencentAuthError as exc:
+            messagebox.showerror("粘贴内容无法识别",
+                                 f"{exc}\n\n{getattr(exc, 'hint', '')}".strip())
+            return
+        threading.Thread(target=self._finish_authorize,
+                         args=(credentials, code, got_state, state), daemon=True).start()
+
+    def _finish_authorize(self, credentials, code: str, got_state: str, state: str) -> None:
+        if got_state and state and got_state != state:
+            self.ui_queue.put(("auth_err", "state 不匹配，授权可能被篡改",
+                               "请重新点「连接腾讯文档」"))
+            return
+        try:
+            tokens = tdoc_auth.exchange_code(credentials, code)
+        except tdoc_auth.TencentAuthError as exc:
+            self.ui_queue.put(("auth_err", str(exc), getattr(exc, "hint", "")))
+            return
+        tdoc_auth.TokenStore().save(tokens)
+        self.ui_queue.put(("auth_ok", tokens))
+
+    def _on_auth_ok(self, tokens) -> None:
+        self._refresh_tencent_hint()
+        self._log(f"腾讯文档已连接：{tokens.describe()}", "ok")
+        if not (self.tdoc_entry.get().strip() or self.tdoc_url):
+            return
+        if messagebox.askyesno("已连接", f"{tokens.describe()}\n\n现在拉取这份表格吗？"):
+            self._load_from_tencent()
 
     # -------------------------------------------------------------- 文件拖放
     def _enable_file_drop(self) -> None:
@@ -2430,7 +2704,7 @@ class AwardStudio(ctk.CTk, _DnDWrapper):
                   CERT_FONT),
             daemon=True,
         ).start()
-        self.after(80, self._poll)
+        # 结果由常驻的 _poll 处理，这里不再重复排定时器
 
     def _guess_contest(self) -> str:
         if self.excel_title:
@@ -2486,26 +2760,45 @@ class AwardStudio(ctk.CTk, _DnDWrapper):
             self.ui_queue.put(("fatal", str(exc)))
 
     def _poll(self) -> None:
+        """常驻的队列泵：生成、腾讯文档同步、授权结果都从这里回到界面线程。
+
+        只在界面线程里改控件，后台线程一律往 self.ui_queue 里投消息。
+        """
         try:
             while True:
                 message = self.ui_queue.get_nowait()
-                if message[0] == "log":
-                    self._log(message[1], message[2])
-                elif message[0] == "done":
-                    _, created, failures, out_dir = message
-                    self._finish(created, failures, out_dir)
-                    return
-                elif message[0] == "fatal":
-                    self.busy = False
-                    self.generate_btn.configure(text="生成奖状", fg_color=PRIMARY)
-                    self._sync_buttons()
-                    self.status_label.configure(text="生成失败", text_color=DANGER)
-                    self._log(f"生成失败：{message[1]}", "err")
-                    messagebox.showerror("生成失败", message[1])
-                    return
+                self._handle_message(message)
         except queue.Empty:
             pass
         self.after(80, self._poll)
+
+    def _handle_message(self, message: tuple) -> None:
+        kind = message[0]
+        if kind == "log":
+            self._log(message[1], message[2])
+        elif kind == "done":
+            _, created, failures, out_dir = message
+            self._finish(created, failures, out_dir)
+        elif kind == "fatal":
+            self.busy = False
+            self.generate_btn.configure(text="生成奖状", fg_color=PRIMARY)
+            self._sync_buttons()
+            self.status_label.configure(text="生成失败", text_color=DANGER)
+            self._log(f"生成失败：{message[1]}", "err")
+            messagebox.showerror("生成失败", message[1])
+        elif kind == "cloud":
+            _, result, refresh = message
+            self._finish_tencent(result, refresh)
+        elif kind == "cloud_err":
+            _, error, hint, refresh = message
+            self._fail_tencent(error, hint, refresh)
+        elif kind == "auth_ok":
+            self._on_auth_ok(message[1])
+        elif kind == "auth_err":
+            self._refresh_tencent_hint("授权失败，请重试", DANGER)
+            self._log(f"授权失败：{message[1]}", "err")
+            messagebox.showerror("授权失败",
+                                 message[1] + (f"\n\n{message[2]}" if message[2] else ""))
 
     def _finish(self, created: list[Path], failures: list[str], out_dir: Path) -> None:
         self.busy = False
